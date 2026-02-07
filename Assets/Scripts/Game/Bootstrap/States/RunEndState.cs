@@ -24,9 +24,10 @@ namespace Game.Bootstrap.States
 
         public void Enter()
         {
-            Log.Info("Enter RunEnd");
+            Log.Info("Run Ended");
             _gameRoot?.DestroyWorldRuntime();
             Log.Info("WorldRuntime disposed");
+            _machine?.SwitchState("MetaHub");
         }
 
         public void Exit()

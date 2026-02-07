@@ -1,6 +1,6 @@
-# Export: 2026-02-07 20:05:04
+# Export: 2026-02-07 21:37:35
 # Source: Assets/Scripts
-# Files: 84
+# Files: 97
 
 
 
@@ -63,6 +63,7 @@ namespace Game.Bootstrap
         {
             DestroyWorldRuntime();
             _worldRuntime = WorldBootstrap.CreateWorld(locationId, biomeId);
+            _worldRuntime.OnRequestRunEnd += () => _stateMachine?.SwitchState("RunEnd");
         }
 
         public void DestroyWorldRuntime()
@@ -505,9 +506,10 @@ namespace Game.Bootstrap.States
 
         public void Enter()
         {
-            Log.Info("Enter RunEnd");
+            Log.Info("Run Ended");
             _gameRoot?.DestroyWorldRuntime();
             Log.Info("WorldRuntime disposed");
+            _machine?.SwitchState("MetaHub");
         }
 
         public void Exit()
@@ -1507,6 +1509,75 @@ namespace Game.Runtime.Abilities
 
 ==========
 
+# FILE: Game/Runtime/Camera/CameraBoundsProvider.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Camera
+{
+    public class CameraBoundsProvider
+    {
+        private Rect _bounds;
+
+        public Rect GetBounds() => _bounds;
+
+        public void SetBounds(Rect bounds)
+        {
+            _bounds = bounds;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Camera/CameraFollowRuntime.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Camera
+{
+    public class CameraFollowRuntime
+    {
+        public Vector2 TargetPosition { get; private set; }
+        public Vector2 CurrentPosition { get; set; }
+        public float FollowSpeed { get; set; }
+        public Rect WorldBounds { get; private set; }
+
+        public CameraFollowRuntime(float followSpeed = 8f)
+        {
+            FollowSpeed = followSpeed;
+        }
+
+        public void SetTargetPosition(Vector2 pos)
+        {
+            TargetPosition = pos;
+        }
+
+        public void SetWorldBounds(Rect bounds)
+        {
+            WorldBounds = bounds;
+        }
+
+        public void Tick(float dt)
+        {
+            var delta = TargetPosition - CurrentPosition;
+            var step = FollowSpeed * dt;
+            if (delta.sqrMagnitude <= step * step)
+                CurrentPosition = TargetPosition;
+            else
+                CurrentPosition += delta.normalized * step;
+
+            CurrentPosition = new Vector2(
+                Mathf.Clamp(CurrentPosition.x, WorldBounds.xMin, WorldBounds.xMax),
+                Mathf.Clamp(CurrentPosition.y, WorldBounds.yMin, WorldBounds.yMax));
+        }
+    }
+}
+
+
+==========
+
 # FILE: Game/Runtime/Combat/AutoCombatResolver.cs
 
 using System.Collections.Generic;
@@ -2339,6 +2410,72 @@ namespace Game.Runtime.Enemy
 
 ==========
 
+# FILE: Game/Runtime/Enemy/EnemyAttackRuntime.cs
+
+using System;
+using UnityEngine;
+using Game.Runtime.Combat;
+
+namespace Game.Runtime.Enemy
+{
+    public class EnemyAttackRuntime
+    {
+        private readonly EnemyRuntime _runtime;
+        private readonly CombatSystem _combatSystem;
+        private readonly ICombatant _playerCombatant;
+        private readonly Func<Vector2> _getPlayerPosition;
+        private readonly float _attackDamage;
+        private readonly float _attackRange;
+        private readonly float _attackCooldown;
+        private float _cooldownTimer;
+
+        public EnemyAttackRuntime(
+            EnemyRuntime runtime,
+            CombatSystem combatSystem,
+            ICombatant playerCombatant,
+            Func<Vector2> getPlayerPosition,
+            float attackDamage,
+            float attackRange,
+            float attackCooldown)
+        {
+            _runtime = runtime;
+            _combatSystem = combatSystem;
+            _playerCombatant = playerCombatant;
+            _getPlayerPosition = getPlayerPosition;
+            _attackDamage = attackDamage;
+            _attackRange = attackRange;
+            _attackCooldown = attackCooldown;
+            _cooldownTimer = 0f;
+        }
+
+        public void Tick(float dt)
+        {
+            if (_runtime == null || !_runtime.isAlive) return;
+            if (_playerCombatant == null || !_playerCombatant.IsAlive) return;
+            if (_combatSystem == null) return;
+
+            _cooldownTimer -= dt;
+            if (_cooldownTimer > 0f) return;
+
+            var playerPos = _getPlayerPosition != null ? _getPlayerPosition() : Vector2.zero;
+            var dist = (playerPos - _runtime.Position).magnitude;
+            if (dist > _attackRange) return;
+
+            var evt = new DamageEvent
+            {
+                source = _runtime,
+                target = _playerCombatant,
+                damage = _attackDamage
+            };
+            _combatSystem.ApplyDamage(evt);
+            _cooldownTimer = _attackCooldown;
+        }
+    }
+}
+
+
+==========
+
 # FILE: Game/Runtime/Enemy/EnemyConfig.cs
 
 using UnityEngine;
@@ -2358,6 +2495,10 @@ namespace Game.Runtime.Enemy
         public float moveSpeed = 3f;
         public float aggroRadius = 10f;
         public float stopDistance = 1.5f;
+        [Header("Attack (PHASE 18)")]
+        public float attackDamage = 10f;
+        public float attackRange = 2f;
+        public float attackCooldown = 1.5f;
     }
 }
 
@@ -2512,6 +2653,7 @@ namespace Game.Runtime.Enemy
         private readonly EnemyConfigDatabase _database;
         private readonly CombatSystem _combatSystem;
         private readonly Func<Vector2> _getPlayerPosition;
+        private readonly ICombatant _playerCombatant;
         private readonly List<EnemyInstance> _instances = new List<EnemyInstance>();
         private readonly List<EnemyRuntime> _toRemove = new List<EnemyRuntime>();
 
@@ -2526,11 +2668,12 @@ namespace Game.Runtime.Enemy
             }
         }
 
-        public EnemySystem(EnemyConfigDatabase database, CombatSystem combatSystem, Func<Vector2> getPlayerPosition)
+        public EnemySystem(EnemyConfigDatabase database, CombatSystem combatSystem, Func<Vector2> getPlayerPosition, ICombatant playerCombatant)
         {
             _database = database;
             _combatSystem = combatSystem;
             _getPlayerPosition = getPlayerPosition;
+            _playerCombatant = playerCombatant;
         }
 
         public EnemyRuntime SpawnEnemy(string enemyId, Vector2 position, string chunkId = null)
@@ -2563,8 +2706,10 @@ namespace Game.Runtime.Enemy
 
             var ai = new EnemyAI(runtime, _getPlayerPosition);
             var binder = new EnemyViewBinder(runtime, view);
+            var attack = new EnemyAttackRuntime(runtime, _combatSystem, _playerCombatant, _getPlayerPosition,
+                config.attackDamage, config.attackRange, config.attackCooldown);
 
-            _instances.Add(new EnemyInstance { Runtime = runtime, AI = ai, ViewRoot = viewRoot, Binder = binder });
+            _instances.Add(new EnemyInstance { Runtime = runtime, AI = ai, Attack = attack, ViewRoot = viewRoot, Binder = binder });
             _combatSystem?.Register(runtime);
             return runtime;
         }
@@ -2612,6 +2757,7 @@ namespace Game.Runtime.Enemy
             {
                 if (inst.Runtime == null || !inst.Runtime.isAlive) continue;
                 inst.AI?.Tick(dt);
+                inst.Attack?.Tick(dt);
                 inst.Binder?.Tick();
             }
         }
@@ -2620,6 +2766,7 @@ namespace Game.Runtime.Enemy
         {
             public EnemyRuntime Runtime;
             public EnemyAI AI;
+            public EnemyAttackRuntime Attack;
             public GameObject ViewRoot;
             public EnemyViewBinder Binder;
         }
@@ -3156,23 +3303,98 @@ namespace Game.Runtime.Player
     /// Holds Camera and follows a target position. No Update — position set from outside (PlayerRuntime.Tick).
     /// Simple follow, no smoothing.
     /// </summary>
-    [RequireComponent(typeof(Camera))]
+    [RequireComponent(typeof(global::UnityEngine.Camera))]
     public class PlayerCameraRig : MonoBehaviour
     {
-        private Camera _camera;
+        private global::UnityEngine.Camera _camera;
         private static readonly Vector3 CameraOffset = new Vector3(0f, 0f, -10f);
 
-        public Camera Camera => _camera;
+        public global::UnityEngine.Camera Camera => _camera;
 
         private void Awake()
         {
-            _camera = GetComponent<Camera>();
+            _camera = GetComponent<global::UnityEngine.Camera>();
         }
 
         /// <summary>Move camera to follow given world position (2D). Called from PlayerRuntime.Tick.</summary>
         public void Follow(Vector2 worldPosition)
         {
             transform.position = new Vector3(worldPosition.x, worldPosition.y, 0f) + CameraOffset;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerController.cs
+
+using System.Collections.Generic;
+using Game.Runtime.Combat;
+using Game.Runtime.Abilities;
+
+namespace Game.Runtime.Player
+{
+    public class PlayerController
+    {
+        private readonly AbilitySystem _abilitySystem;
+        private readonly PlayerCombatProbe _probe;
+
+        public PlayerController(AbilitySystem abilitySystem, PlayerCombatProbe probe)
+        {
+            _abilitySystem = abilitySystem;
+            _probe = probe;
+        }
+
+        public void OnAbilityPressed(string abilityId)
+        {
+            var targets = _probe?.EnemiesInRange;
+            if (targets == null || targets.Count == 0) return;
+            _abilitySystem?.TryActivateAbility(abilityId, targets);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerHealthRuntime.cs
+
+using System;
+
+namespace Game.Runtime.Player
+{
+    public class PlayerHealthRuntime
+    {
+        private int _currentHP;
+
+        public int maxHP { get; private set; }
+        public int currentHP => _currentHP;
+        public bool IsAlive { get; private set; } = true;
+
+        public event Action OnDeath;
+
+        public PlayerHealthRuntime(int maxHP = 100)
+        {
+            this.maxHP = Math.Max(1, maxHP);
+            _currentHP = this.maxHP;
+        }
+
+        public void ApplyDamage(int dmg)
+        {
+            if (!IsAlive || dmg <= 0) return;
+            _currentHP = Math.Max(0, _currentHP - dmg);
+            if (_currentHP <= 0)
+            {
+                IsAlive = false;
+                OnDeath?.Invoke();
+            }
+        }
+
+        public void Heal(int value)
+        {
+            if (!IsAlive || value <= 0) return;
+            _currentHP = Math.Min(maxHP, _currentHP + value);
         }
     }
 }
@@ -3198,6 +3420,37 @@ namespace Game.Runtime.Player
             var raw = new Vector2(h, v);
             var input = raw.sqrMagnitude > 1f ? raw.normalized : raw;
             PlayerSystemRegistry.Current?.SetInput(input);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerInputBehaviour.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Player
+{
+    public class PlayerInputBehaviour : MonoBehaviour
+    {
+        private PlayerController _controller;
+
+        public void Init(PlayerController controller)
+        {
+            _controller = controller;
+        }
+
+        private void Update()
+        {
+            if (_controller == null) return;
+            if (UnityEngine.Input.GetKeyDown(KeyCode.Q))
+                _controller.OnAbilityPressed("ability_primary");
+            if (UnityEngine.Input.GetKeyDown(KeyCode.E))
+                _controller.OnAbilityPressed("ability_secondary");
+            if (UnityEngine.Input.GetKeyDown(KeyCode.R))
+                _controller.OnAbilityPressed("ability_ultimate");
         }
     }
 }
@@ -3237,23 +3490,33 @@ using Game.Runtime.Combat;
 
 namespace Game.Runtime.Player
 {
-    /// <summary>
-    /// Runtime player entity. Position, input, movement. Implements ICombatant. Not a MonoBehaviour (PHASE 16).
-    /// </summary>
     public class PlayerRuntime : ICombatant
     {
+        private readonly PlayerHealthRuntime _health;
+
         public Vector2 Position { get; set; }
         public Vector2 InputVector { get; private set; }
         public float MoveSpeed { get; set; }
+        public PlayerHealthRuntime Health => _health;
 
         Vector2 ICombatant.WorldPosition => Position;
-        bool ICombatant.IsAlive => true;
-        CombatStats ICombatant.Stats => new CombatStats { maxHealth = 100f, currentHealth = 100f, attackPower = 10f };
-        void ICombatant.TakeDamage(float damage) { }
+        bool ICombatant.IsAlive => _health != null && _health.IsAlive;
+        CombatStats ICombatant.Stats => new CombatStats
+        {
+            maxHealth = _health != null ? _health.maxHP : 0,
+            currentHealth = _health != null ? _health.currentHP : 0,
+            attackPower = 10f
+        };
 
-        public PlayerRuntime(Vector2 startPosition, float moveSpeed = 5f)
+        void ICombatant.TakeDamage(float damage)
+        {
+            _health?.ApplyDamage(Mathf.RoundToInt(damage));
+        }
+
+        public PlayerRuntime(Vector2 startPosition, PlayerHealthRuntime health, float moveSpeed = 5f)
         {
             Position = startPosition;
+            _health = health;
             MoveSpeed = Mathf.Max(0f, moveSpeed);
         }
 
@@ -3279,7 +3542,6 @@ using Game.Runtime.Combat;
 using Game.Runtime.Interaction;
 using Game.Runtime.Services;
 using Game.View.Player;
-using Game.View.Camera;
 
 namespace Game.Runtime.Player
 {
@@ -3296,8 +3558,6 @@ namespace Game.Runtime.Player
         private Game.View.Player.PlayerView _view;
         private PlayerViewBinder _binder;
         private GameObject _viewRoot;
-        private CameraFollow _cameraFollow;
-        private GameObject _cameraRoot;
 
         public PlayerRuntime PlayerRuntime => _playerRuntime;
         public Vector2 GetPosition() => _playerRuntime != null ? _playerRuntime.Position : Vector2.zero;
@@ -3308,9 +3568,9 @@ namespace Game.Runtime.Player
             _interactionSystem = interactionSystem;
         }
 
-        public void Initialize()
+        public void Initialize(PlayerHealthRuntime health)
         {
-            _playerRuntime = new PlayerRuntime(Vector2.zero, 5f);
+            _playerRuntime = new PlayerRuntime(Vector2.zero, health, 5f);
 
             var prefab = Resources.Load<GameObject>(PlayerViewPrefabPath);
             if (prefab != null)
@@ -3328,11 +3588,6 @@ namespace Game.Runtime.Player
             _viewRoot.name = "Player";
             _view.SetPosition(_playerRuntime.Position);
             _binder = new PlayerViewBinder(_playerRuntime, _view);
-
-            _cameraRoot = new GameObject("PlayerCamera");
-            var cam = _cameraRoot.AddComponent<UnityEngine.Camera>();
-            _cameraFollow = _cameraRoot.AddComponent<CameraFollow>();
-            _cameraFollow.Target = _viewRoot.transform;
 
             _combatSystem?.Register(_playerRuntime);
             Log.Info("[Player] Spawned");
@@ -3356,10 +3611,6 @@ namespace Game.Runtime.Player
             _combatSystem?.Unregister(_playerRuntime);
             _playerRuntime = null;
             _binder = null;
-            if (_cameraRoot != null)
-                Object.Destroy(_cameraRoot);
-            _cameraRoot = null;
-            _cameraFollow = null;
             if (_viewRoot != null)
                 Object.Destroy(_viewRoot);
             _viewRoot = null;
@@ -3665,6 +3916,222 @@ namespace Game.Runtime.Services
 
 ==========
 
+# FILE: Game/Runtime/World/ChunkConfig.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// ScriptableObject: конфигурация чанка (id, позиция в мире, размер, ключ для загрузки).
+    /// Addressables-ready: addressableKey можно заменить на ключ Addressables без смены архитектуры.
+    /// </summary>
+    [CreateAssetMenu(fileName = "ChunkConfig", menuName = "Game/Chunk Config", order = 1)]
+    public class ChunkConfig : ScriptableObject
+    {
+        public string chunkId;
+        public Vector2 worldPosition;
+        public Vector2 size;
+        public string addressableKey;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/ChunkConfigSet.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Набор ChunkConfig для локации. Загружается из Resources, передаётся в ChunkStreamingSystem.
+    /// </summary>
+    [CreateAssetMenu(fileName = "ChunkConfigSet", menuName = "Game/Chunk Config Set", order = 2)]
+    public class ChunkConfigSet : ScriptableObject
+    {
+        public List<ChunkConfig> configs = new List<ChunkConfig>();
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/ChunkInstance.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Runtime-экземпляр загруженного чанка: конфиг, корневой GameObject, флаг загрузки.
+    /// </summary>
+    public class ChunkInstance
+    {
+        public ChunkConfig config;
+        public GameObject instance;
+        public bool IsLoaded;
+
+        public ChunkInstance(ChunkConfig config, GameObject instance)
+        {
+            this.config = config;
+            this.instance = instance;
+            IsLoaded = instance != null;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/ChunkLoader.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Изолированный загрузчик чанков: только Resources.Load, Instantiate, Destroy.
+    /// Без Unity Editor, без Addressables — позже addressableKey можно использовать для Addressables.LoadAsync.
+    /// </summary>
+    public class ChunkLoader
+    {
+        /// <summary>
+        /// Загружает чанк по конфигу: Resources.Load по addressableKey, Instantiate, позиция из config.worldPosition.
+        /// </summary>
+        public GameObject LoadChunk(ChunkConfig config)
+        {
+            if (config == null || string.IsNullOrEmpty(config.addressableKey))
+                return null;
+
+            var prefab = Resources.Load<GameObject>(config.addressableKey);
+            if (prefab == null)
+                return null;
+
+            var instance = Object.Instantiate(prefab);
+            instance.name = "Chunk_" + (string.IsNullOrEmpty(config.chunkId) ? config.addressableKey : config.chunkId);
+            instance.transform.position = new Vector3(config.worldPosition.x, config.worldPosition.y, 0f);
+            return instance;
+        }
+
+        /// <summary>
+        /// Выгружает чанк: уничтожает GameObject экземпляра.
+        /// </summary>
+        public void UnloadChunk(ChunkInstance chunkInstance)
+        {
+            if (chunkInstance == null) return;
+            if (chunkInstance.instance != null)
+                Object.Destroy(chunkInstance.instance);
+            chunkInstance.instance = null;
+            chunkInstance.IsLoaded = false;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/ChunkStreamingSystem.cs
+
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using Game.Runtime.Player;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Стриминг чанков по позиции игрока. Не знает про Unity Editor.
+    /// Отслеживает PlayerRuntime.Position, определяет нужные чанки, загружает/выгружает через ChunkLoader.
+    /// </summary>
+    public class ChunkStreamingSystem
+    {
+        private readonly Func<Vector2> _getPlayerPosition;
+        private readonly float _streamingRadius;
+        private readonly ChunkLoader _loader;
+        private readonly List<ChunkConfig> _allConfigs;
+        private readonly Dictionary<string, ChunkInstance> _activeChunks = new Dictionary<string, ChunkInstance>();
+
+        public IReadOnlyDictionary<string, ChunkInstance> ActiveChunks => _activeChunks;
+
+        public ChunkStreamingSystem(
+            PlayerRuntime playerRuntime,
+            float streamingRadius,
+            IReadOnlyList<ChunkConfig> configs,
+            ChunkLoader loader)
+        {
+            if (playerRuntime == null)
+                throw new ArgumentNullException(nameof(playerRuntime));
+            _getPlayerPosition = () => playerRuntime.Position;
+            _streamingRadius = Mathf.Max(0f, streamingRadius);
+            _loader = loader ?? new ChunkLoader();
+            _allConfigs = configs != null ? new List<ChunkConfig>(configs) : new List<ChunkConfig>();
+        }
+
+        /// <summary>
+        /// Вызывать каждый кадр/тик. Обновляет набор чанков по позиции игрока.
+        /// </summary>
+        public void Tick(float dt)
+        {
+            Vector2 playerPos = _getPlayerPosition();
+            var center = new Vector3(playerPos.x, playerPos.y, 0f);
+            var size = new Vector3(_streamingRadius * 2f, _streamingRadius * 2f, 1f);
+            var streamingBounds = new Bounds(center, size);
+
+            var desiredIds = new HashSet<string>();
+            foreach (var config in _allConfigs)
+            {
+                if (config == null || string.IsNullOrEmpty(config.chunkId)) continue;
+                if (!ChunkBoundsIntersects(config, streamingBounds)) continue;
+                desiredIds.Add(config.chunkId);
+            }
+
+            foreach (var config in _allConfigs)
+            {
+                if (config == null || string.IsNullOrEmpty(config.chunkId)) continue;
+                if (!desiredIds.Contains(config.chunkId)) continue;
+                if (_activeChunks.ContainsKey(config.chunkId)) continue;
+
+                var go = _loader.LoadChunk(config);
+                if (go != null)
+                {
+                    var instance = new ChunkInstance(config, go);
+                    instance.IsLoaded = true;
+                    _activeChunks[config.chunkId] = instance;
+                }
+            }
+
+            var toUnload = new List<string>();
+            foreach (var kv in _activeChunks)
+            {
+                if (!desiredIds.Contains(kv.Key))
+                    toUnload.Add(kv.Key);
+            }
+            foreach (var id in toUnload)
+            {
+                if (_activeChunks.TryGetValue(id, out var instance))
+                {
+                    _loader.UnloadChunk(instance);
+                    _activeChunks.Remove(id);
+                }
+            }
+        }
+
+        private static bool ChunkBoundsIntersects(ChunkConfig config, Bounds area)
+        {
+            var chunkBounds = new Bounds(
+                new Vector3(config.worldPosition.x, config.worldPosition.y, 0f),
+                new Vector3(config.size.x, config.size.y, 1f));
+            return chunkBounds.Intersects(area);
+        }
+    }
+}
+
+
+==========
+
 # FILE: Game/Runtime/World/DefaultWorldGraph.cs
 
 namespace Game.Runtime.World
@@ -3943,6 +4410,7 @@ namespace Game.Runtime.World
 # FILE: Game/Runtime/World/WorldRuntime.cs
 
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using Game.Runtime.World.Chunks;
 using Game.Runtime.Player;
@@ -3950,7 +4418,9 @@ using Game.Runtime.Interaction;
 using Game.Runtime.Enemy;
 using Game.Runtime.Combat;
 using Game.Runtime.Abilities;
+using Game.Runtime.Camera;
 using Game.Runtime.Services;
+using Game.View.Camera;
 
 namespace Game.Runtime.World
 {
@@ -3963,6 +4433,7 @@ namespace Game.Runtime.World
         private WorldRuntimeContext _context;
         private IChunkSource _chunkSource;
         private ChunkStreamer _chunkStreamer;
+        private ChunkStreamingSystem _chunkStreamingSystem;
         private InteractionSystem _interactionSystem;
         private EnemyConfigDatabase _enemyConfigDatabase;
         private CombatSystem _combatSystem;
@@ -3971,9 +4442,17 @@ namespace Game.Runtime.World
         private PlayerCombatProbe _playerCombatProbe;
         private AbilitySystem _abilitySystem;
         private AutoCombatResolver _autoCombatResolver;
+        private PlayerController _playerController;
+        private GameObject _playerInputBehaviourRoot;
+        private PlayerHealthRuntime _playerHealth;
+        private CameraFollowRuntime _cameraFollowRuntime;
+        private CameraBoundsProvider _cameraBoundsProvider;
+        private CameraViewBinder _cameraViewBinder;
+        private GameObject _cameraRoot;
         private bool _disposed;
 
         private const float InteractionRequestRadius = 5f;
+        private static readonly Rect DefaultWorldBounds = new Rect(-500f, -500f, 1000f, 1000f);
         private const float CombatDetectionRadius = 8f;
         private const float CombatAttackInterval = 1f;
 
@@ -3982,8 +4461,13 @@ namespace Game.Runtime.World
 
         public event Action OnWorldRuntimeReady;
         public event Action OnWorldRuntimeDisposed;
+        public event Action OnRequestRunEnd;
 
-        /// <summary>Set chunk source (e.g. LocationChunkSet). Also forwards to ChunkStreamer.</summary>
+        private void RequestRunEnd()
+        {
+            OnRequestRunEnd?.Invoke();
+        }
+
         public void SetChunkSource(IChunkSource source)
         {
             _chunkSource = source;
@@ -4003,16 +4487,39 @@ namespace Game.Runtime.World
             _enemyConfigDatabase = Resources.Load<EnemyConfigDatabase>("EnemyConfigDatabase");
             _combatSystem = new CombatSystem();
             _combatSystem.OnCombatantDeath += _ => Log.Info("[Combat] Enemy died");
+            _playerHealth = new PlayerHealthRuntime(100);
+            _playerHealth.OnDeath += RequestRunEnd;
             _playerSystem = new PlayerSystem(_combatSystem, _interactionSystem);
             PlayerSystemRegistry.Set(_playerSystem);
-            _playerSystem.Initialize();
-            _enemySystem = new EnemySystem(_enemyConfigDatabase, _combatSystem, () => _playerSystem.GetPosition());
+            _playerSystem.Initialize(_playerHealth);
+
+            var chunkConfigSet = Resources.Load<ChunkConfigSet>("ChunkConfigSet");
+            var chunkConfigs = chunkConfigSet != null && chunkConfigSet.configs != null ? chunkConfigSet.configs : new List<ChunkConfig>();
+            if (chunkConfigs.Count > 0)
+            {
+                _chunkStreamingSystem = new ChunkStreamingSystem(_playerSystem.PlayerRuntime, 30f, chunkConfigs, new ChunkLoader());
+            }
+
+            _enemySystem = new EnemySystem(_enemyConfigDatabase, _combatSystem, () => _playerSystem.GetPosition(), _playerSystem.PlayerRuntime);
             EnemySystemRegistry.Set(_enemySystem);
             _playerCombatProbe = new PlayerCombatProbe(_combatSystem, () => _playerSystem.GetPosition(), CombatDetectionRadius, _playerSystem.PlayerRuntime);
             _abilitySystem = new AbilitySystem(_combatSystem, _playerSystem.PlayerRuntime);
             foreach (var config in Resources.LoadAll<AbilityConfig>(""))
                 _abilitySystem.AddAbility(config);
             _autoCombatResolver = new AutoCombatResolver(_combatSystem, _playerCombatProbe, _playerSystem.PlayerRuntime, _abilitySystem, CombatAttackInterval);
+            _playerController = new PlayerController(_abilitySystem, _playerCombatProbe);
+            _playerInputBehaviourRoot = new GameObject("PlayerAbilityInput");
+            _playerInputBehaviourRoot.AddComponent<PlayerInputBehaviour>().Init(_playerController);
+            _cameraBoundsProvider = new CameraBoundsProvider();
+            _cameraBoundsProvider.SetBounds(DefaultWorldBounds);
+            _cameraFollowRuntime = new CameraFollowRuntime(8f);
+            _cameraFollowRuntime.SetWorldBounds(_cameraBoundsProvider.GetBounds());
+            _cameraFollowRuntime.SetTargetPosition(_playerSystem.GetPosition());
+            _cameraFollowRuntime.CurrentPosition = _playerSystem.GetPosition();
+            _cameraRoot = new GameObject("WorldCamera");
+            var cameraView = _cameraRoot.AddComponent<CameraView>();
+            _cameraViewBinder = new CameraViewBinder(_cameraFollowRuntime, cameraView);
+            _cameraViewBinder.Tick();
             _context.isInitialized = true;
             InteractionSystemRegistry.Set(_interactionSystem);
             OnWorldRuntimeReady?.Invoke();
@@ -4022,7 +4529,10 @@ namespace Game.Runtime.World
         {
             if (_context == null || !_context.isInitialized || _disposed) return;
 
-            _chunkStreamer?.UpdateStreaming(_playerSystem.GetPosition());
+            if (_chunkStreamingSystem != null)
+                _chunkStreamingSystem.Tick(dt);
+            else
+                _chunkStreamer?.UpdateStreaming(_playerSystem.GetPosition());
 
             if (UnityEngine.Input.GetKeyDown(KeyCode.E))
             {
@@ -4035,6 +4545,10 @@ namespace Game.Runtime.World
             _abilitySystem?.Tick(dt);
             _autoCombatResolver?.Tick(dt);
             _playerSystem?.Tick(dt);
+            _cameraFollowRuntime?.SetTargetPosition(_playerSystem.GetPosition());
+            _cameraFollowRuntime?.SetWorldBounds(_cameraBoundsProvider.GetBounds());
+            _cameraFollowRuntime?.Tick(dt);
+            _cameraViewBinder?.Tick();
         }
 
         public void Dispose()
@@ -4050,10 +4564,26 @@ namespace Game.Runtime.World
             EnemySystemRegistry.Clear();
             _enemySystem = null;
             _autoCombatResolver = null;
+            if (_playerInputBehaviourRoot != null)
+                UnityEngine.Object.Destroy(_playerInputBehaviourRoot);
+            _playerInputBehaviourRoot = null;
+            _playerController = null;
+            if (_playerHealth != null)
+            {
+                _playerHealth.OnDeath -= RequestRunEnd;
+                _playerHealth = null;
+            }
             _abilitySystem = null;
             _playerCombatProbe = null;
+            _cameraViewBinder = null;
+            _cameraFollowRuntime = null;
+            _cameraBoundsProvider = null;
+            if (_cameraRoot != null)
+                UnityEngine.Object.Destroy(_cameraRoot);
+            _cameraRoot = null;
             _combatSystem = null;
             _chunkStreamer = null;
+            _chunkStreamingSystem = null;
             _chunkSource = null;
             _context = null;
         }
@@ -4362,6 +4892,65 @@ namespace Game.View.Camera
             if (_target == null) return;
             var p = _target.position;
             transform.position = new Vector3(p.x, p.y, p.z + _zOffset);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/View/Camera/CameraView.cs
+
+using UnityEngine;
+
+namespace Game.View.Camera
+{
+    public class CameraView : MonoBehaviour
+    {
+        [SerializeField] private UnityEngine.Camera _camera;
+        [SerializeField] private float _zOffset = -10f;
+
+        public UnityEngine.Camera Camera => _camera;
+
+        private void Awake()
+        {
+            if (_camera == null)
+                _camera = GetComponent<UnityEngine.Camera>();
+            if (_camera == null)
+                _camera = gameObject.AddComponent<UnityEngine.Camera>();
+        }
+
+        public void SetPosition(Vector2 worldPos)
+        {
+            transform.position = new Vector3(worldPos.x, worldPos.y, _zOffset);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/View/Camera/CameraViewBinder.cs
+
+using Game.Runtime.Camera;
+
+namespace Game.View.Camera
+{
+    public class CameraViewBinder
+    {
+        private readonly CameraFollowRuntime _runtime;
+        private readonly CameraView _view;
+
+        public CameraViewBinder(CameraFollowRuntime runtime, CameraView view)
+        {
+            _runtime = runtime;
+            _view = view;
+        }
+
+        public void Tick()
+        {
+            if (_runtime != null && _view != null)
+                _view.SetPosition(_runtime.CurrentPosition);
         }
     }
 }

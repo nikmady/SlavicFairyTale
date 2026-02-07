@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using Game.Runtime.World.Chunks;
 using Game.Runtime.Player;
@@ -6,7 +7,9 @@ using Game.Runtime.Interaction;
 using Game.Runtime.Enemy;
 using Game.Runtime.Combat;
 using Game.Runtime.Abilities;
+using Game.Runtime.Camera;
 using Game.Runtime.Services;
+using Game.View.Camera;
 
 namespace Game.Runtime.World
 {
@@ -19,6 +22,7 @@ namespace Game.Runtime.World
         private WorldRuntimeContext _context;
         private IChunkSource _chunkSource;
         private ChunkStreamer _chunkStreamer;
+        private ChunkStreamingSystem _chunkStreamingSystem;
         private InteractionSystem _interactionSystem;
         private EnemyConfigDatabase _enemyConfigDatabase;
         private CombatSystem _combatSystem;
@@ -27,9 +31,17 @@ namespace Game.Runtime.World
         private PlayerCombatProbe _playerCombatProbe;
         private AbilitySystem _abilitySystem;
         private AutoCombatResolver _autoCombatResolver;
+        private PlayerController _playerController;
+        private GameObject _playerInputBehaviourRoot;
+        private PlayerHealthRuntime _playerHealth;
+        private CameraFollowRuntime _cameraFollowRuntime;
+        private CameraBoundsProvider _cameraBoundsProvider;
+        private CameraViewBinder _cameraViewBinder;
+        private GameObject _cameraRoot;
         private bool _disposed;
 
         private const float InteractionRequestRadius = 5f;
+        private static readonly Rect DefaultWorldBounds = new Rect(-500f, -500f, 1000f, 1000f);
         private const float CombatDetectionRadius = 8f;
         private const float CombatAttackInterval = 1f;
 
@@ -38,8 +50,13 @@ namespace Game.Runtime.World
 
         public event Action OnWorldRuntimeReady;
         public event Action OnWorldRuntimeDisposed;
+        public event Action OnRequestRunEnd;
 
-        /// <summary>Set chunk source (e.g. LocationChunkSet). Also forwards to ChunkStreamer.</summary>
+        private void RequestRunEnd()
+        {
+            OnRequestRunEnd?.Invoke();
+        }
+
         public void SetChunkSource(IChunkSource source)
         {
             _chunkSource = source;
@@ -59,16 +76,39 @@ namespace Game.Runtime.World
             _enemyConfigDatabase = Resources.Load<EnemyConfigDatabase>("EnemyConfigDatabase");
             _combatSystem = new CombatSystem();
             _combatSystem.OnCombatantDeath += _ => Log.Info("[Combat] Enemy died");
+            _playerHealth = new PlayerHealthRuntime(100);
+            _playerHealth.OnDeath += RequestRunEnd;
             _playerSystem = new PlayerSystem(_combatSystem, _interactionSystem);
             PlayerSystemRegistry.Set(_playerSystem);
-            _playerSystem.Initialize();
-            _enemySystem = new EnemySystem(_enemyConfigDatabase, _combatSystem, () => _playerSystem.GetPosition());
+            _playerSystem.Initialize(_playerHealth);
+
+            var chunkConfigSet = Resources.Load<ChunkConfigSet>("ChunkConfigSet");
+            var chunkConfigs = chunkConfigSet != null && chunkConfigSet.configs != null ? chunkConfigSet.configs : new List<ChunkConfig>();
+            if (chunkConfigs.Count > 0)
+            {
+                _chunkStreamingSystem = new ChunkStreamingSystem(_playerSystem.PlayerRuntime, 30f, chunkConfigs, new ChunkLoader());
+            }
+
+            _enemySystem = new EnemySystem(_enemyConfigDatabase, _combatSystem, () => _playerSystem.GetPosition(), _playerSystem.PlayerRuntime);
             EnemySystemRegistry.Set(_enemySystem);
             _playerCombatProbe = new PlayerCombatProbe(_combatSystem, () => _playerSystem.GetPosition(), CombatDetectionRadius, _playerSystem.PlayerRuntime);
             _abilitySystem = new AbilitySystem(_combatSystem, _playerSystem.PlayerRuntime);
             foreach (var config in Resources.LoadAll<AbilityConfig>(""))
                 _abilitySystem.AddAbility(config);
             _autoCombatResolver = new AutoCombatResolver(_combatSystem, _playerCombatProbe, _playerSystem.PlayerRuntime, _abilitySystem, CombatAttackInterval);
+            _playerController = new PlayerController(_abilitySystem, _playerCombatProbe);
+            _playerInputBehaviourRoot = new GameObject("PlayerAbilityInput");
+            _playerInputBehaviourRoot.AddComponent<PlayerInputBehaviour>().Init(_playerController);
+            _cameraBoundsProvider = new CameraBoundsProvider();
+            _cameraBoundsProvider.SetBounds(DefaultWorldBounds);
+            _cameraFollowRuntime = new CameraFollowRuntime(8f);
+            _cameraFollowRuntime.SetWorldBounds(_cameraBoundsProvider.GetBounds());
+            _cameraFollowRuntime.SetTargetPosition(_playerSystem.GetPosition());
+            _cameraFollowRuntime.CurrentPosition = _playerSystem.GetPosition();
+            _cameraRoot = new GameObject("WorldCamera");
+            var cameraView = _cameraRoot.AddComponent<CameraView>();
+            _cameraViewBinder = new CameraViewBinder(_cameraFollowRuntime, cameraView);
+            _cameraViewBinder.Tick();
             _context.isInitialized = true;
             InteractionSystemRegistry.Set(_interactionSystem);
             OnWorldRuntimeReady?.Invoke();
@@ -78,7 +118,10 @@ namespace Game.Runtime.World
         {
             if (_context == null || !_context.isInitialized || _disposed) return;
 
-            _chunkStreamer?.UpdateStreaming(_playerSystem.GetPosition());
+            if (_chunkStreamingSystem != null)
+                _chunkStreamingSystem.Tick(dt);
+            else
+                _chunkStreamer?.UpdateStreaming(_playerSystem.GetPosition());
 
             if (UnityEngine.Input.GetKeyDown(KeyCode.E))
             {
@@ -91,6 +134,10 @@ namespace Game.Runtime.World
             _abilitySystem?.Tick(dt);
             _autoCombatResolver?.Tick(dt);
             _playerSystem?.Tick(dt);
+            _cameraFollowRuntime?.SetTargetPosition(_playerSystem.GetPosition());
+            _cameraFollowRuntime?.SetWorldBounds(_cameraBoundsProvider.GetBounds());
+            _cameraFollowRuntime?.Tick(dt);
+            _cameraViewBinder?.Tick();
         }
 
         public void Dispose()
@@ -106,10 +153,26 @@ namespace Game.Runtime.World
             EnemySystemRegistry.Clear();
             _enemySystem = null;
             _autoCombatResolver = null;
+            if (_playerInputBehaviourRoot != null)
+                UnityEngine.Object.Destroy(_playerInputBehaviourRoot);
+            _playerInputBehaviourRoot = null;
+            _playerController = null;
+            if (_playerHealth != null)
+            {
+                _playerHealth.OnDeath -= RequestRunEnd;
+                _playerHealth = null;
+            }
             _abilitySystem = null;
             _playerCombatProbe = null;
+            _cameraViewBinder = null;
+            _cameraFollowRuntime = null;
+            _cameraBoundsProvider = null;
+            if (_cameraRoot != null)
+                UnityEngine.Object.Destroy(_cameraRoot);
+            _cameraRoot = null;
             _combatSystem = null;
             _chunkStreamer = null;
+            _chunkStreamingSystem = null;
             _chunkSource = null;
             _context = null;
         }

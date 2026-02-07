@@ -53,6 +53,7 @@ namespace Game.Bootstrap
         {
             DestroyWorldRuntime();
             _worldRuntime = WorldBootstrap.CreateWorld(locationId, biomeId);
+            _worldRuntime.OnRequestRunEnd += () => _stateMachine?.SwitchState("RunEnd");
         }
 
         public void DestroyWorldRuntime()

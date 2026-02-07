@@ -14,6 +14,7 @@ namespace Game.Runtime.Enemy
         private readonly EnemyConfigDatabase _database;
         private readonly CombatSystem _combatSystem;
         private readonly Func<Vector2> _getPlayerPosition;
+        private readonly ICombatant _playerCombatant;
         private readonly List<EnemyInstance> _instances = new List<EnemyInstance>();
         private readonly List<EnemyRuntime> _toRemove = new List<EnemyRuntime>();
 
@@ -28,11 +29,12 @@ namespace Game.Runtime.Enemy
             }
         }
 
-        public EnemySystem(EnemyConfigDatabase database, CombatSystem combatSystem, Func<Vector2> getPlayerPosition)
+        public EnemySystem(EnemyConfigDatabase database, CombatSystem combatSystem, Func<Vector2> getPlayerPosition, ICombatant playerCombatant)
         {
             _database = database;
             _combatSystem = combatSystem;
             _getPlayerPosition = getPlayerPosition;
+            _playerCombatant = playerCombatant;
         }
 
         public EnemyRuntime SpawnEnemy(string enemyId, Vector2 position, string chunkId = null)
@@ -65,8 +67,10 @@ namespace Game.Runtime.Enemy
 
             var ai = new EnemyAI(runtime, _getPlayerPosition);
             var binder = new EnemyViewBinder(runtime, view);
+            var attack = new EnemyAttackRuntime(runtime, _combatSystem, _playerCombatant, _getPlayerPosition,
+                config.attackDamage, config.attackRange, config.attackCooldown);
 
-            _instances.Add(new EnemyInstance { Runtime = runtime, AI = ai, ViewRoot = viewRoot, Binder = binder });
+            _instances.Add(new EnemyInstance { Runtime = runtime, AI = ai, Attack = attack, ViewRoot = viewRoot, Binder = binder });
             _combatSystem?.Register(runtime);
             return runtime;
         }
@@ -114,6 +118,7 @@ namespace Game.Runtime.Enemy
             {
                 if (inst.Runtime == null || !inst.Runtime.isAlive) continue;
                 inst.AI?.Tick(dt);
+                inst.Attack?.Tick(dt);
                 inst.Binder?.Tick();
             }
         }
@@ -122,6 +127,7 @@ namespace Game.Runtime.Enemy
         {
             public EnemyRuntime Runtime;
             public EnemyAI AI;
+            public EnemyAttackRuntime Attack;
             public GameObject ViewRoot;
             public EnemyViewBinder Binder;
         }

@@ -15,5 +15,9 @@ namespace Game.Runtime.Enemy
         public float moveSpeed = 3f;
         public float aggroRadius = 10f;
         public float stopDistance = 1.5f;
+        [Header("Attack (PHASE 18)")]
+        public float attackDamage = 10f;
+        public float attackRange = 2f;
+        public float attackCooldown = 1.5f;
     }
 }

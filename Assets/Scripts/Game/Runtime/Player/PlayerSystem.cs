@@ -3,7 +3,6 @@ using Game.Runtime.Combat;
 using Game.Runtime.Interaction;
 using Game.Runtime.Services;
 using Game.View.Player;
-using Game.View.Camera;
 
 namespace Game.Runtime.Player
 {
@@ -20,8 +19,6 @@ namespace Game.Runtime.Player
         private Game.View.Player.PlayerView _view;
         private PlayerViewBinder _binder;
         private GameObject _viewRoot;
-        private CameraFollow _cameraFollow;
-        private GameObject _cameraRoot;
 
         public PlayerRuntime PlayerRuntime => _playerRuntime;
         public Vector2 GetPosition() => _playerRuntime != null ? _playerRuntime.Position : Vector2.zero;
@@ -32,9 +29,9 @@ namespace Game.Runtime.Player
             _interactionSystem = interactionSystem;
         }
 
-        public void Initialize()
+        public void Initialize(PlayerHealthRuntime health)
         {
-            _playerRuntime = new PlayerRuntime(Vector2.zero, 5f);
+            _playerRuntime = new PlayerRuntime(Vector2.zero, health, 5f);
 
             var prefab = Resources.Load<GameObject>(PlayerViewPrefabPath);
             if (prefab != null)
@@ -52,11 +49,6 @@ namespace Game.Runtime.Player
             _viewRoot.name = "Player";
             _view.SetPosition(_playerRuntime.Position);
             _binder = new PlayerViewBinder(_playerRuntime, _view);
-
-            _cameraRoot = new GameObject("PlayerCamera");
-            var cam = _cameraRoot.AddComponent<UnityEngine.Camera>();
-            _cameraFollow = _cameraRoot.AddComponent<CameraFollow>();
-            _cameraFollow.Target = _viewRoot.transform;
 
             _combatSystem?.Register(_playerRuntime);
             Log.Info("[Player] Spawned");
@@ -80,10 +72,6 @@ namespace Game.Runtime.Player
             _combatSystem?.Unregister(_playerRuntime);
             _playerRuntime = null;
             _binder = null;
-            if (_cameraRoot != null)
-                Object.Destroy(_cameraRoot);
-            _cameraRoot = null;
-            _cameraFollow = null;
             if (_viewRoot != null)
                 Object.Destroy(_viewRoot);
             _viewRoot = null;
