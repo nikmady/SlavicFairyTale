@@ -1,6 +1,6 @@
-# Export: 2026-02-07 05:27:51
+# Export: 2026-02-07 20:05:04
 # Source: Assets/Scripts
-# Files: 61
+# Files: 84
 
 
 
@@ -1303,6 +1303,515 @@ namespace Game.Presentation.UI
 
 ==========
 
+# FILE: Game/Runtime/Abilities/AbilityConfig.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Abilities
+{
+    /// <summary>
+    /// Data-only ability config. Effect is resolved by AbilityEffectType (PHASE 14).
+    /// </summary>
+    [CreateAssetMenu(fileName = "AbilityConfig", menuName = "Game/Ability Config", order = 0)]
+    public class AbilityConfig : ScriptableObject
+    {
+        public string abilityId;
+        public float cooldown;
+        public float range;
+        public float power;
+        public AbilityEffectType effectType;
+    }
+
+    public enum AbilityEffectType
+    {
+        DealDamage
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Abilities/AbilityEffect.cs
+
+using System.Collections.Generic;
+using Game.Runtime.Combat;
+
+namespace Game.Runtime.Abilities
+{
+    /// <summary>
+    /// Base for ability effects. Apply uses CombatSystem (PHASE 14).
+    /// </summary>
+    public abstract class AbilityEffect
+    {
+        public abstract void Apply(CombatSystem combatSystem, ICombatant source, IReadOnlyList<ICombatant> targets, AbilityConfig config);
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Abilities/AbilityRuntime.cs
+
+using System.Collections.Generic;
+using Game.Runtime.Combat;
+using Game.Runtime.Services;
+
+namespace Game.Runtime.Abilities
+{
+    /// <summary>
+    /// Runtime instance of an ability: cooldown and activation. Not a MonoBehaviour (PHASE 14).
+    /// </summary>
+    public class AbilityRuntime
+    {
+        public AbilityConfig config { get; }
+        public float cooldownTimer { get; private set; }
+
+        private readonly CombatSystem _combatSystem;
+        private readonly ICombatant _caster;
+
+        public AbilityRuntime(AbilityConfig config, CombatSystem combatSystem, ICombatant caster)
+        {
+            this.config = config;
+            _combatSystem = combatSystem;
+            _caster = caster;
+            cooldownTimer = 0f;
+        }
+
+        public bool CanActivate() => config != null && cooldownTimer <= 0f;
+
+        public void Activate(IReadOnlyList<ICombatant> targets)
+        {
+            if (config == null || _combatSystem == null || _caster == null) return;
+            if (targets == null || targets.Count == 0) return;
+
+            var effect = CreateEffect(config.effectType);
+            if (effect == null) return;
+
+            Log.Info($"[Ability] Activated {config.abilityId}");
+            effect.Apply(_combatSystem, _caster, targets, config);
+            cooldownTimer = config.cooldown;
+            Log.Info("[Ability] Cooldown started");
+        }
+
+        public void Tick(float dt)
+        {
+            if (cooldownTimer > 0f)
+                cooldownTimer -= dt;
+        }
+
+        private static AbilityEffect CreateEffect(AbilityEffectType effectType)
+        {
+            switch (effectType)
+            {
+                case AbilityEffectType.DealDamage:
+                    return new DealDamageEffect();
+                default:
+                    return null;
+            }
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Abilities/AbilitySystem.cs
+
+using System.Collections.Generic;
+using Game.Runtime.Combat;
+
+namespace Game.Runtime.Abilities
+{
+    /// <summary>
+    /// Holds AbilityRuntime instances. TryActivateAbility and Tick (PHASE 14).
+    /// </summary>
+    public class AbilitySystem
+    {
+        private readonly List<AbilityRuntime> _abilities = new List<AbilityRuntime>();
+
+        public IReadOnlyList<AbilityRuntime> Abilities => _abilities;
+
+        public AbilitySystem(CombatSystem combatSystem, ICombatant caster)
+        {
+            CombatSystem = combatSystem;
+            Caster = caster;
+        }
+
+        public CombatSystem CombatSystem { get; }
+        public ICombatant Caster { get; }
+
+        public void AddAbility(AbilityConfig config)
+        {
+            if (config == null) return;
+            _abilities.Add(new AbilityRuntime(config, CombatSystem, Caster));
+        }
+
+        public AbilityRuntime GetById(string abilityId)
+        {
+            if (string.IsNullOrEmpty(abilityId)) return null;
+            foreach (var a in _abilities)
+            {
+                if (a?.config != null && a.config.abilityId == abilityId)
+                    return a;
+            }
+            return null;
+        }
+
+        public bool TryActivateAbility(string abilityId, IReadOnlyList<ICombatant> targets)
+        {
+            var ability = GetById(abilityId);
+            if (ability == null || !ability.CanActivate()) return false;
+            if (targets == null || targets.Count == 0) return false;
+
+            ability.Activate(targets);
+            return true;
+        }
+
+        public void Tick(float dt)
+        {
+            foreach (var a in _abilities)
+                a?.Tick(dt);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Abilities/DealDamageEffect.cs
+
+using System.Collections.Generic;
+using Game.Runtime.Combat;
+
+namespace Game.Runtime.Abilities
+{
+    /// <summary>
+    /// Creates DamageEvent per target and applies via CombatSystem (PHASE 14).
+    /// </summary>
+    public class DealDamageEffect : AbilityEffect
+    {
+        public override void Apply(CombatSystem combatSystem, ICombatant source, IReadOnlyList<ICombatant> targets, AbilityConfig config)
+        {
+            if (combatSystem == null || source == null || targets == null) return;
+
+            foreach (var target in targets)
+            {
+                if (target == null || !target.IsAlive) continue;
+                var evt = new DamageEvent { source = source, target = target, damage = config.power };
+                combatSystem.ApplyDamage(evt);
+            }
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Combat/AutoCombatResolver.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+using Game.Runtime.Services;
+using Game.Runtime.Abilities;
+
+namespace Game.Runtime.Combat
+{
+    /// <summary>
+    /// Auto-combat: uses ready ability on nearest enemy, else base damage. All via CombatSystem (PHASE 14).
+    /// </summary>
+    public class AutoCombatResolver
+    {
+        private readonly CombatSystem _combatSystem;
+        private readonly PlayerCombatProbe _probe;
+        private readonly ICombatant _playerCombatant;
+        private readonly AbilitySystem _abilitySystem;
+        private readonly float _attackInterval;
+        private float _timer;
+
+        public AutoCombatResolver(CombatSystem combatSystem, PlayerCombatProbe probe, ICombatant playerCombatant, AbilitySystem abilitySystem, float attackInterval)
+        {
+            _combatSystem = combatSystem;
+            _probe = probe;
+            _playerCombatant = playerCombatant;
+            _abilitySystem = abilitySystem;
+            _attackInterval = attackInterval;
+            _timer = 0f;
+        }
+
+        public void Tick(float dt)
+        {
+            var enemies = _probe?.EnemiesInRange;
+            if (enemies == null || enemies.Count == 0)
+            {
+                _timer = 0f;
+                return;
+            }
+
+            var nearest = GetNearest(enemies, _playerCombatant.WorldPosition);
+            if (nearest == null || !nearest.IsAlive) return;
+
+            _timer -= dt;
+            if (_timer <= 0f)
+            {
+                var playerPos = _playerCombatant.WorldPosition;
+                var distance = (nearest.WorldPosition - playerPos).magnitude;
+                var targets = new List<ICombatant> { nearest };
+                var usedAbility = false;
+
+                if (_abilitySystem != null)
+                {
+                    foreach (var ability in _abilitySystem.Abilities)
+                    {
+                        if (ability != null && ability.CanActivate() && ability.config != null && ability.config.range >= distance)
+                        {
+                            _abilitySystem.TryActivateAbility(ability.config.abilityId, targets);
+                            usedAbility = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!usedAbility)
+                {
+                    var damage = _playerCombatant.Stats.attackPower;
+                    var evt = new DamageEvent { source = _playerCombatant, target = nearest, damage = damage };
+                    _combatSystem.ApplyDamage(evt);
+                    Log.Info($"[Combat] Player hits Enemy for {damage}");
+                }
+
+                _timer = _attackInterval;
+            }
+        }
+
+        private static ICombatant GetNearest(IReadOnlyList<ICombatant> list, Vector2 from)
+        {
+            ICombatant nearest = null;
+            float nearestSq = float.MaxValue;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var c = list[i];
+                if (c == null || !c.IsAlive) continue;
+                var sq = (c.WorldPosition - from).sqrMagnitude;
+                if (sq < nearestSq)
+                {
+                    nearestSq = sq;
+                    nearest = c;
+                }
+            }
+            return nearest;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Combat/CombatStats.cs
+
+namespace Game.Runtime.Combat
+{
+    /// <summary>
+    /// Data-only combat stats. No damage logic (PHASE 12).
+    /// </summary>
+    public struct CombatStats
+    {
+        public float maxHealth;
+        public float currentHealth;
+        public float attackPower;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Combat/CombatSystem.cs
+
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Game.Runtime.Combat
+{
+    /// <summary>
+    /// Holds registered combatants, range queries, and ApplyDamage. Enemies register via EnemySystem (PHASE 13).
+    /// </summary>
+    public class CombatSystem
+    {
+        private readonly List<ICombatant> _combatants = new List<ICombatant>();
+
+        public event Action<ICombatant> OnCombatantDeath;
+
+        public void Register(ICombatant combatant)
+        {
+            if (combatant != null && !_combatants.Contains(combatant))
+                _combatants.Add(combatant);
+        }
+
+        public void Unregister(ICombatant combatant)
+        {
+            if (combatant != null)
+                _combatants.Remove(combatant);
+        }
+
+        /// <summary>Returns combatants within radius of center. Linear pass; no damage.</summary>
+        public IReadOnlyList<ICombatant> QueryInRange(Vector2 center, float radius)
+        {
+            var result = new List<ICombatant>();
+            if (radius <= 0f) return result;
+
+            float radiusSq = radius * radius;
+            foreach (var c in _combatants)
+            {
+                if (c == null || !c.IsAlive) continue;
+                var delta = c.WorldPosition - center;
+                if (delta.sqrMagnitude <= radiusSq)
+                    result.Add(c);
+            }
+            return result;
+        }
+
+        /// <summary>Apply damage to target; if target dies, raises OnCombatantDeath.</summary>
+        public void ApplyDamage(DamageEvent evt)
+        {
+            if (evt?.target == null) return;
+
+            evt.target.TakeDamage(evt.damage);
+            if (!evt.target.IsAlive)
+                OnCombatantDeath?.Invoke(evt.target);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Combat/DamageEvent.cs
+
+namespace Game.Runtime.Combat
+{
+    /// <summary>
+    /// Data-only damage event. No logic (PHASE 13).
+    /// </summary>
+    public class DamageEvent
+    {
+        public ICombatant source;
+        public ICombatant target;
+        public float damage;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Combat/ICombatant.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Combat
+{
+    /// <summary>
+    /// Interface for combat query and damage. ApplyDamage is handled by CombatSystem (PHASE 13).
+    /// </summary>
+    public interface ICombatant
+    {
+        Vector2 WorldPosition { get; }
+        bool IsAlive { get; }
+        CombatStats Stats { get; }
+        /// <summary>Apply damage; implementation sets currentHealth and IsAlive. Called by CombatSystem.ApplyDamage.</summary>
+        void TakeDamage(float damage);
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Combat/PlayerCombatant.cs
+
+using System;
+using UnityEngine;
+
+namespace Game.Runtime.Combat
+{
+    /// <summary>
+    /// Player as ICombatant for DamageEvent source. Position from delegate; attackPower for auto-combat (PHASE 13).
+    /// </summary>
+    public class PlayerCombatant : ICombatant
+    {
+        private readonly Func<Vector2> _getPosition;
+        private readonly float _attackPower;
+
+        public PlayerCombatant(Func<Vector2> getPosition, float attackPower)
+        {
+            _getPosition = getPosition;
+            _attackPower = attackPower;
+        }
+
+        public Vector2 WorldPosition => _getPosition != null ? _getPosition() : Vector2.zero;
+        public bool IsAlive => true;
+        public CombatStats Stats => new CombatStats { maxHealth = 100f, currentHealth = 100f, attackPower = _attackPower };
+
+        public void TakeDamage(float damage) { /* Player damage not used in PHASE 13 */ }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Combat/PlayerCombatProbe.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+using Game.Runtime.Services;
+
+namespace Game.Runtime.Combat
+{
+    /// <summary>
+    /// Owned by WorldRuntime; probes CombatSystem for enemies in range of player. No interaction with enemies (PHASE 12).
+    /// </summary>
+    public class PlayerCombatProbe
+    {
+        private readonly CombatSystem _combatSystem;
+        private readonly System.Func<Vector2> _getPlayerPosition;
+        private readonly float _detectionRadius;
+        private readonly ICombatant _playerCombatant;
+        private readonly List<ICombatant> _filtered = new List<ICombatant>();
+
+        public IReadOnlyList<ICombatant> EnemiesInRange { get; private set; } = new List<ICombatant>().AsReadOnly();
+
+        public PlayerCombatProbe(CombatSystem combatSystem, System.Func<Vector2> getPlayerPosition, float detectionRadius, ICombatant playerCombatant)
+        {
+            _combatSystem = combatSystem;
+            _getPlayerPosition = getPlayerPosition;
+            _detectionRadius = detectionRadius;
+            _playerCombatant = playerCombatant;
+        }
+
+        public void Tick(float dt)
+        {
+            if (_combatSystem == null || _getPlayerPosition == null) return;
+
+            var center = _getPlayerPosition();
+            var raw = _combatSystem.QueryInRange(center, _detectionRadius);
+            _filtered.Clear();
+            if (raw != null)
+            {
+                foreach (var c in raw)
+                {
+                    if (c != null && c != _playerCombatant)
+                        _filtered.Add(c);
+                }
+            }
+            EnemiesInRange = _filtered;
+
+            if (_filtered.Count > 0)
+                Log.Info($"[Combat] Player sees {_filtered.Count} enemies");
+        }
+    }
+}
+
+
+==========
+
 # FILE: Game/Runtime/Contexts/EconomyState.cs
 
 using System;
@@ -1676,11 +2185,6 @@ using Game.Runtime.Services;
 
 namespace Game.Runtime.Enemy
 {
-    /// <summary>
-    /// On chunk root. Registers EnemySpawnPoint with EnemySystem on enable; despawns all on disable.
-    /// Supports late binding: if EnemySystem is not ready, subscribes to OnReady then registers.
-    /// Chunk fully owns the lifecycle of spawned enemies.
-    /// </summary>
     public class ChunkEnemyRegistrar : MonoBehaviour
     {
         private readonly List<EnemyRuntime> _spawnedEnemies = new List<EnemyRuntime>();
@@ -1697,7 +2201,7 @@ namespace Game.Runtime.Enemy
             {
                 if (sp == null || string.IsNullOrEmpty(sp.enemyId)) continue;
                 var pos = (Vector2)sp.transform.position;
-                var enemy = system.SpawnEnemy(sp.enemyId, pos);
+                var enemy = system.SpawnEnemy(sp.enemyId, pos, gameObject.name);
                 if (enemy != null)
                     _spawnedEnemies.Add(enemy);
             }
@@ -1728,12 +2232,19 @@ namespace Game.Runtime.Enemy
             if (_isRegistered) return;
 
             if (EnemySystemRegistry.Current != null)
-                RegisterAll();
+                StartCoroutine(RegisterNextFrame());
             else
             {
                 _subscribedToReady = true;
                 EnemySystemRegistry.OnReady += OnEnemySystemReady;
             }
+        }
+
+        private System.Collections.IEnumerator RegisterNextFrame()
+        {
+            yield return null;
+            if (_isRegistered) yield break;
+            RegisterAll();
         }
 
         private void OnEnemySystemReady()
@@ -1742,7 +2253,7 @@ namespace Game.Runtime.Enemy
             if (_isRegistered) return;
             _subscribedToReady = false;
             EnemySystemRegistry.OnReady -= OnEnemySystemReady;
-            RegisterAll();
+            StartCoroutine(RegisterNextFrame());
         }
 
         private void OnDisable()
@@ -1783,52 +2294,173 @@ namespace Game.Runtime.Enemy
 
 ==========
 
-# FILE: Game/Runtime/Enemy/EnemyRuntime.cs
+# FILE: Game/Runtime/Enemy/EnemyAI.cs
+
+using System;
+using UnityEngine;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// Simple AI: move toward player when in aggro range, stop at stop distance. Not a MonoBehaviour (PHASE 17).
+    /// </summary>
+    public class EnemyAI
+    {
+        private readonly EnemyRuntime _runtime;
+        private readonly Func<Vector2> _getPlayerPosition;
+
+        public EnemyAI(EnemyRuntime runtime, Func<Vector2> getPlayerPosition)
+        {
+            _runtime = runtime;
+            _getPlayerPosition = getPlayerPosition;
+        }
+
+        public void Tick(float dt)
+        {
+            if (_runtime == null || !_runtime.isAlive) return;
+
+            var playerPos = _getPlayerPosition != null ? _getPlayerPosition() : Vector2.zero;
+            var target = playerPos + _runtime.TargetOffset;
+            var toPlayer = target - _runtime.Position;
+            var distance = toPlayer.magnitude;
+
+            if (distance > _runtime.AggroRadius)
+                return;
+
+            if (distance <= _runtime.StopDistance)
+                return;
+
+            var dir = toPlayer.normalized;
+            _runtime.Position += dir * _runtime.MoveSpeed * dt;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/EnemyConfig.cs
 
 using UnityEngine;
 
 namespace Game.Runtime.Enemy
 {
     /// <summary>
-    /// Runtime enemy entity. Creates/destroys view, holds position. No combat/AI in PHASE 11B.
-    /// Does not know about world or player.
+    /// Data-only config for one enemy type. Used by EnemySystem to spawn with correct view and stats.
+    /// </summary>
+    [CreateAssetMenu(fileName = "EnemyConfig", menuName = "Game/Enemy Config", order = 0)]
+    public class EnemyConfig : ScriptableObject
+    {
+        public string enemyId;
+        public float maxHealth = 100f;
+        public GameObject enemyViewPrefab;
+        [Header("Movement (PHASE 17)")]
+        public float moveSpeed = 3f;
+        public float aggroRadius = 10f;
+        public float stopDistance = 1.5f;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/EnemyConfigDatabase.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Game.Runtime.Enemy
+{
+    // -------------------------------------------------------------------------
+    // TEST SETUP (PHASE 11C)
+    // -------------------------------------------------------------------------
+    // 1) Create EnemyConfig asset: Right-click in Project → Create → Game → Enemy Config.
+    //    Set enemyId (e.g. "enemy_skeleton"), maxHealth, and assign enemyViewPrefab.
+    // 2) EnemyView prefab: Create a prefab with root GameObject that has EnemyView component
+    //    (and optionally SpriteRenderer as child or on same object). Assign this prefab to
+    //    EnemyConfig.enemyViewPrefab.
+    // 3) Link with EnemySpawnPoint: Set EnemySpawnPoint.enemyId (on spawn point in chunk)
+    //    to the same string as EnemyConfig.enemyId (e.g. "enemy_skeleton").
+    // 4) Put EnemyConfigDatabase in a Resources folder: Create asset via Create → Game →
+    //    Enemy Config Database, add your EnemyConfig entries to configs list, save the asset
+    //    as "EnemyConfigDatabase" inside any Resources folder (e.g. Assets/Resources/).
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Database of enemy configs. Load via Resources (e.g. Resources.Load&lt;EnemyConfigDatabase&gt;("EnemyConfigDatabase")).
+    /// </summary>
+    [CreateAssetMenu(fileName = "EnemyConfigDatabase", menuName = "Game/Enemy Config Database", order = 1)]
+    public class EnemyConfigDatabase : ScriptableObject
+    {
+        public List<EnemyConfig> configs = new List<EnemyConfig>();
+
+        public EnemyConfig GetById(string enemyId)
+        {
+            if (string.IsNullOrEmpty(enemyId) || configs == null) return null;
+            foreach (var c in configs)
+            {
+                if (c != null && c.enemyId == enemyId)
+                    return c;
+            }
+            return null;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/EnemyRuntime.cs
+
+using UnityEngine;
+using Game.Runtime.Combat;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// Runtime enemy entity. Config, health, position, movement params. View bound from outside. Implements ICombatant (PHASE 17).
     /// </summary>
     public class EnemyRuntime : ICombatant
     {
-        public string enemyId { get; }
-        public Vector2 position { get; set; }
-        public EnemyView view { get; private set; }
+        public EnemyConfig Config { get; }
+        public string enemyId => Config != null ? Config.enemyId : string.Empty;
+        public Vector2 Position { get; set; }
+        public float MoveSpeed { get; private set; }
+        public float AggroRadius { get; private set; }
+        public float StopDistance { get; private set; }
+        public Vector2 TargetOffset { get; private set; }
         public bool isAlive { get; set; }
         public string spawnChunkId { get; }
 
-        Vector2 ICombatant.Position => position;
-        bool ICombatant.IsAlive => isAlive;
+        /// <summary>Current health. Initialized from Config.maxHealth.</summary>
+        public float currentHealth { get; set; }
 
-        private GameObject _root;
+        public float maxHealth => Config != null ? Config.maxHealth : 0f;
+
+        Vector2 ICombatant.WorldPosition => Position;
+        bool ICombatant.IsAlive => isAlive;
+        CombatStats ICombatant.Stats => new CombatStats { maxHealth = maxHealth, currentHealth = currentHealth, attackPower = 0f };
+
+        void ICombatant.TakeDamage(float damage)
+        {
+            currentHealth -= damage;
+            if (currentHealth <= 0f)
+                isAlive = false;
+        }
+
         private bool _disposed;
 
-        public EnemyRuntime(string enemyId, Vector2 position, string spawnChunkId = null)
+        public EnemyRuntime(EnemyConfig config, Vector2 position, string spawnChunkId = null)
         {
-            this.enemyId = enemyId;
-            this.position = position;
+            Config = config;
+            Position = position;
             this.spawnChunkId = spawnChunkId ?? string.Empty;
+            currentHealth = config != null ? config.maxHealth : 0f;
             isAlive = true;
-        }
-
-        public void Initialize()
-        {
-            if (_disposed) return;
-
-            _root = new GameObject($"Enemy_{enemyId}");
-            _root.transform.position = new Vector3(position.x, position.y, 0f);
-            view = _root.AddComponent<EnemyView>();
-        }
-
-        public void Tick(float dt)
-        {
-            if (_root == null || view == null || _disposed) return;
-
-            _root.transform.position = new Vector3(position.x, position.y, 0f);
+            MoveSpeed = config != null ? config.moveSpeed : 3f;
+            AggroRadius = config != null ? config.aggroRadius : 10f;
+            StopDistance = config != null ? config.stopDistance : 1.5f;
+            TargetOffset = Random.insideUnitCircle * 1.2f;
         }
 
         public void Dispose()
@@ -1836,10 +2468,6 @@ namespace Game.Runtime.Enemy
             if (_disposed) return;
             _disposed = true;
             isAlive = false;
-            if (_root != null)
-                Object.Destroy(_root);
-            _root = null;
-            view = null;
         }
     }
 }
@@ -1868,59 +2496,132 @@ namespace Game.Runtime.Enemy
 
 # FILE: Game/Runtime/Enemy/EnemySystem.cs
 
+using System;
 using System.Collections.Generic;
 using UnityEngine;
+using Game.Runtime.Combat;
+using Game.View.Enemy;
 
 namespace Game.Runtime.Enemy
 {
     /// <summary>
-    /// Holds and updates all EnemyRuntime. Spawns/despawns by id and position. Does not know about Player.
+    /// Spawns enemies with EnemyRuntime, EnemyAI, EnemyView prefab, EnemyViewBinder. Ticks AI and binders. Registers with CombatSystem (PHASE 17).
     /// </summary>
     public class EnemySystem
     {
-        private readonly List<EnemyRuntime> _enemies = new List<EnemyRuntime>();
+        private readonly EnemyConfigDatabase _database;
+        private readonly CombatSystem _combatSystem;
+        private readonly Func<Vector2> _getPlayerPosition;
+        private readonly List<EnemyInstance> _instances = new List<EnemyInstance>();
         private readonly List<EnemyRuntime> _toRemove = new List<EnemyRuntime>();
 
-        public IReadOnlyList<EnemyRuntime> Enemies => _enemies;
+        public IReadOnlyList<EnemyRuntime> Enemies
+        {
+            get
+            {
+                var list = new List<EnemyRuntime>(_instances.Count);
+                foreach (var i in _instances)
+                    if (i.Runtime != null) list.Add(i.Runtime);
+                return list;
+            }
+        }
+
+        public EnemySystem(EnemyConfigDatabase database, CombatSystem combatSystem, Func<Vector2> getPlayerPosition)
+        {
+            _database = database;
+            _combatSystem = combatSystem;
+            _getPlayerPosition = getPlayerPosition;
+        }
 
         public EnemyRuntime SpawnEnemy(string enemyId, Vector2 position, string chunkId = null)
         {
             if (string.IsNullOrEmpty(enemyId)) return null;
 
-            var enemy = new EnemyRuntime(enemyId, position, chunkId);
-            enemy.Initialize();
-            _enemies.Add(enemy);
-            return enemy;
+            var config = _database != null ? _database.GetById(enemyId) : null;
+            if (config == null)
+            {
+                Debug.LogError($"[Game] EnemyConfig not found for enemyId: {enemyId}");
+                return null;
+            }
+
+            var runtime = new EnemyRuntime(config, position, chunkId);
+
+            if (config.enemyViewPrefab == null)
+            {
+                Debug.LogError($"[Game] EnemyConfig '{enemyId}' has no enemyViewPrefab assigned.");
+                return null;
+            }
+
+            var viewRoot = UnityEngine.Object.Instantiate(config.enemyViewPrefab);
+            viewRoot.name = $"Enemy_{enemyId}";
+
+            var view = viewRoot.GetComponent<Game.View.Enemy.EnemyView>();
+            if (view == null)
+                view = viewRoot.AddComponent<Game.View.Enemy.EnemyView>();
+
+            view.SetPosition(runtime.Position);
+
+            var ai = new EnemyAI(runtime, _getPlayerPosition);
+            var binder = new EnemyViewBinder(runtime, view);
+
+            _instances.Add(new EnemyInstance { Runtime = runtime, AI = ai, ViewRoot = viewRoot, Binder = binder });
+            _combatSystem?.Register(runtime);
+            return runtime;
         }
 
         public void DespawnEnemy(EnemyRuntime enemy)
         {
             if (enemy == null) return;
-            enemy.Dispose();
-            _enemies.Remove(enemy);
+            _toRemove.Add(enemy);
+        }
+
+        private void RemoveEnemy(EnemyRuntime enemy)
+        {
+            for (int i = _instances.Count - 1; i >= 0; i--)
+            {
+                if (_instances[i].Runtime != enemy) continue;
+                _combatSystem?.Unregister(enemy);
+                enemy.Dispose();
+                if (_instances[i].ViewRoot != null)
+                    UnityEngine.Object.Destroy(_instances[i].ViewRoot);
+                _instances.RemoveAt(i);
+                return;
+            }
         }
 
         public void DespawnEnemiesInChunk(string chunkId)
         {
             if (string.IsNullOrEmpty(chunkId)) return;
-
             _toRemove.Clear();
-            foreach (var e in _enemies)
+            foreach (var inst in _instances)
             {
-                if (e != null && e.spawnChunkId == chunkId)
-                    _toRemove.Add(e);
+                if (inst.Runtime != null && inst.Runtime.spawnChunkId == chunkId)
+                    _toRemove.Add(inst.Runtime);
             }
             foreach (var e in _toRemove)
-                DespawnEnemy(e);
+                RemoveEnemy(e);
         }
 
         public void Tick(float dt)
         {
-            foreach (var e in _enemies)
+            foreach (var e in _toRemove)
+                RemoveEnemy(e);
+            _toRemove.Clear();
+
+            foreach (var inst in _instances)
             {
-                if (e != null && e.isAlive)
-                    e.Tick(dt);
+                if (inst.Runtime == null || !inst.Runtime.isAlive) continue;
+                inst.AI?.Tick(dt);
+                inst.Binder?.Tick();
             }
+        }
+
+        private class EnemyInstance
+        {
+            public EnemyRuntime Runtime;
+            public EnemyAI AI;
+            public GameObject ViewRoot;
+            public EnemyViewBinder Binder;
         }
     }
 }
@@ -1969,12 +2670,21 @@ namespace Game.Runtime.Enemy
     /// <summary>
     /// View-only: visual representation of an enemy. SpriteRenderer, no logic.
     /// Position is driven from outside (EnemyRuntime.Tick).
+    /// In Editor: draws player detection radius in Scene view (match WorldRuntime.CombatDetectionRadius).
     /// </summary>
     public class EnemyView : MonoBehaviour
     {
         [SerializeField] private SpriteRenderer _spriteRenderer;
+        [SerializeField, Tooltip("Radius in which player detects this enemy. Should match CombatDetectionRadius in WorldRuntime.")]
+        private float _playerDetectionRadius = 8f;
 
         public SpriteRenderer SpriteRenderer => _spriteRenderer;
+
+        /// <summary>View-only: set world position. Called by EnemyViewBinder (PHASE 17).</summary>
+        public void SetPosition(Vector2 worldPos)
+        {
+            transform.position = new Vector3(worldPos.x, worldPos.y, transform.position.z);
+        }
 
         private void Awake()
         {
@@ -1983,25 +2693,14 @@ namespace Game.Runtime.Enemy
             if (_spriteRenderer == null)
                 _spriteRenderer = gameObject.AddComponent<SpriteRenderer>();
         }
-    }
-}
 
-
-==========
-
-# FILE: Game/Runtime/Enemy/ICombatant.cs
-
-using UnityEngine;
-
-namespace Game.Runtime.Enemy
-{
-    /// <summary>
-    /// Stub interface for future combat. EnemyRuntime implements it; no behaviour in PHASE 11B.
-    /// </summary>
-    public interface ICombatant
-    {
-        Vector2 Position { get; }
-        bool IsAlive { get; }
+#if UNITY_EDITOR
+        private void OnDrawGizmos()
+        {
+            UnityEditor.Handles.color = new Color(1f, 0.3f, 0.2f, 0.35f);
+            UnityEditor.Handles.DrawWireDisc(transform.position, Vector3.forward, _playerDetectionRadius);
+        }
+#endif
     }
 }
 
@@ -2481,65 +3180,210 @@ namespace Game.Runtime.Player
 
 ==========
 
-# FILE: Game/Runtime/Player/PlayerRuntime.cs
+# FILE: Game/Runtime/Player/PlayerInput.cs
 
 using UnityEngine;
-using Game.Runtime.World;
 
 namespace Game.Runtime.Player
 {
     /// <summary>
-    /// Runtime player entity. Creates/destroys player GameObject, syncs view with anchor, drives camera.
-    /// Not a MonoBehaviour; does not know about StateMachine or MetaContext.
+    /// MonoBehaviour: reads WASD, normalizes, sends to PlayerSystem (PHASE 15).
     /// </summary>
-    public class PlayerRuntime
+    public class PlayerInput : MonoBehaviour
     {
-        public PlayerAnchor anchor { get; }
-        public GameObject root { get; private set; }
-        public PlayerView view { get; private set; }
-        public PlayerCameraRig cameraRig { get; private set; }
-
-        private bool _disposed;
-
-        public PlayerRuntime(PlayerAnchor anchor)
+        private void Update()
         {
-            this.anchor = anchor;
+            float h = UnityEngine.Input.GetAxisRaw("Horizontal");
+            float v = UnityEngine.Input.GetAxisRaw("Vertical");
+            var raw = new Vector2(h, v);
+            var input = raw.sqrMagnitude > 1f ? raw.normalized : raw;
+            PlayerSystemRegistry.Current?.SetInput(input);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerMovement.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Player
+{
+    /// <summary>
+    /// MonoBehaviour: reads WASD, normalizes, sends to PlayerSystem.SetInput() (PHASE 16).
+    /// </summary>
+    public class PlayerMovement : MonoBehaviour
+    {
+        private void Update()
+        {
+            float h = UnityEngine.Input.GetAxisRaw("Horizontal");
+            float v = UnityEngine.Input.GetAxisRaw("Vertical");
+            var raw = new Vector2(h, v);
+            var input = raw.sqrMagnitude > 1f ? raw.normalized : raw;
+            PlayerSystemRegistry.Current?.SetInput(input);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerRuntime.cs
+
+using UnityEngine;
+using Game.Runtime.Combat;
+
+namespace Game.Runtime.Player
+{
+    /// <summary>
+    /// Runtime player entity. Position, input, movement. Implements ICombatant. Not a MonoBehaviour (PHASE 16).
+    /// </summary>
+    public class PlayerRuntime : ICombatant
+    {
+        public Vector2 Position { get; set; }
+        public Vector2 InputVector { get; private set; }
+        public float MoveSpeed { get; set; }
+
+        Vector2 ICombatant.WorldPosition => Position;
+        bool ICombatant.IsAlive => true;
+        CombatStats ICombatant.Stats => new CombatStats { maxHealth = 100f, currentHealth = 100f, attackPower = 10f };
+        void ICombatant.TakeDamage(float damage) { }
+
+        public PlayerRuntime(Vector2 startPosition, float moveSpeed = 5f)
+        {
+            Position = startPosition;
+            MoveSpeed = Mathf.Max(0f, moveSpeed);
         }
 
-        public void Initialize()
+        public void SetInput(Vector2 input)
         {
-            if (anchor == null || _disposed) return;
-
-            root = new GameObject("Player");
-            root.transform.position = new Vector3(anchor.Position.x, anchor.Position.y, 0f);
-            view = root.AddComponent<PlayerView>();
-
-            var cameraGo = new GameObject("PlayerCameraRig");
-            cameraGo.AddComponent<Camera>();
-            cameraRig = cameraGo.AddComponent<PlayerCameraRig>();
+            InputVector = input.sqrMagnitude > 1f ? input.normalized : input;
         }
 
         public void Tick(float dt)
         {
-            if (root == null || view == null || cameraRig == null || _disposed) return;
+            Position += InputVector * MoveSpeed * dt;
+        }
+    }
+}
 
-            var pos = anchor.Position;
-            root.transform.position = new Vector3(pos.x, pos.y, 0f);
-            cameraRig.Follow(pos);
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerSystem.cs
+
+using UnityEngine;
+using Game.Runtime.Combat;
+using Game.Runtime.Interaction;
+using Game.Runtime.Services;
+using Game.View.Player;
+using Game.View.Camera;
+
+namespace Game.Runtime.Player
+{
+    /// <summary>
+    /// Creates PlayerRuntime, PlayerView prefab, PlayerViewBinder, CameraFollow. Registers in CombatSystem. Tick Runtime + Binder (PHASE 16).
+    /// </summary>
+    public class PlayerSystem
+    {
+        private const string PlayerViewPrefabPath = "PlayerView";
+
+        private readonly CombatSystem _combatSystem;
+        private readonly InteractionSystem _interactionSystem;
+        private PlayerRuntime _playerRuntime;
+        private Game.View.Player.PlayerView _view;
+        private PlayerViewBinder _binder;
+        private GameObject _viewRoot;
+        private CameraFollow _cameraFollow;
+        private GameObject _cameraRoot;
+
+        public PlayerRuntime PlayerRuntime => _playerRuntime;
+        public Vector2 GetPosition() => _playerRuntime != null ? _playerRuntime.Position : Vector2.zero;
+
+        public PlayerSystem(CombatSystem combatSystem, InteractionSystem interactionSystem)
+        {
+            _combatSystem = combatSystem;
+            _interactionSystem = interactionSystem;
+        }
+
+        public void Initialize()
+        {
+            _playerRuntime = new PlayerRuntime(Vector2.zero, 5f);
+
+            var prefab = Resources.Load<GameObject>(PlayerViewPrefabPath);
+            if (prefab != null)
+            {
+                _viewRoot = Object.Instantiate(prefab);
+                _view = _viewRoot.GetComponent<Game.View.Player.PlayerView>();
+            }
+            if (_view == null)
+            {
+                _viewRoot = new GameObject("Player");
+                _view = _viewRoot.AddComponent<Game.View.Player.PlayerView>();
+                _viewRoot.AddComponent<PlayerMovement>();
+            }
+
+            _viewRoot.name = "Player";
+            _view.SetPosition(_playerRuntime.Position);
+            _binder = new PlayerViewBinder(_playerRuntime, _view);
+
+            _cameraRoot = new GameObject("PlayerCamera");
+            var cam = _cameraRoot.AddComponent<UnityEngine.Camera>();
+            _cameraFollow = _cameraRoot.AddComponent<CameraFollow>();
+            _cameraFollow.Target = _viewRoot.transform;
+
+            _combatSystem?.Register(_playerRuntime);
+            Log.Info("[Player] Spawned");
+        }
+
+        public void SetInput(Vector2 input)
+        {
+            _playerRuntime?.SetInput(input);
+        }
+
+        public void Tick(float dt)
+        {
+            if (_playerRuntime == null) return;
+
+            _playerRuntime.Tick(dt);
+            _binder?.Tick();
         }
 
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
-            if (cameraRig != null && cameraRig.gameObject != null)
-                Object.Destroy(cameraRig.gameObject);
-            cameraRig = null;
-            if (root != null)
-                Object.Destroy(root);
-            root = null;
-            view = null;
+            _combatSystem?.Unregister(_playerRuntime);
+            _playerRuntime = null;
+            _binder = null;
+            if (_cameraRoot != null)
+                Object.Destroy(_cameraRoot);
+            _cameraRoot = null;
+            _cameraFollow = null;
+            if (_viewRoot != null)
+                Object.Destroy(_viewRoot);
+            _viewRoot = null;
+            _view = null;
         }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerSystemRegistry.cs
+
+namespace Game.Runtime.Player
+{
+    /// <summary>
+    /// Static registry for current PlayerSystem. Set/cleared by WorldRuntime (PHASE 15).
+    /// </summary>
+    public static class PlayerSystemRegistry
+    {
+        public static PlayerSystem Current { get; private set; }
+
+        public static void Set(PlayerSystem system) => Current = system;
+        public static void Clear() => Current = null;
     }
 }
 
@@ -3102,10 +3946,11 @@ using System;
 using UnityEngine;
 using Game.Runtime.World.Chunks;
 using Game.Runtime.Player;
-using Game.Runtime.Player.Input;
-using Game.Runtime.Player.Movement;
 using Game.Runtime.Interaction;
 using Game.Runtime.Enemy;
+using Game.Runtime.Combat;
+using Game.Runtime.Abilities;
+using Game.Runtime.Services;
 
 namespace Game.Runtime.World
 {
@@ -3118,15 +3963,19 @@ namespace Game.Runtime.World
         private WorldRuntimeContext _context;
         private IChunkSource _chunkSource;
         private ChunkStreamer _chunkStreamer;
-        private PlayerAnchor _playerAnchor;
-        private PlayerRuntime _playerRuntime;
-        private PlayerInput _playerInput;
-        private PlayerMovement _playerMovement;
         private InteractionSystem _interactionSystem;
+        private EnemyConfigDatabase _enemyConfigDatabase;
+        private CombatSystem _combatSystem;
         private EnemySystem _enemySystem;
+        private PlayerSystem _playerSystem;
+        private PlayerCombatProbe _playerCombatProbe;
+        private AbilitySystem _abilitySystem;
+        private AutoCombatResolver _autoCombatResolver;
         private bool _disposed;
 
         private const float InteractionRequestRadius = 5f;
+        private const float CombatDetectionRadius = 8f;
+        private const float CombatAttackInterval = 1f;
 
         public WorldRuntimeContext Context => _context;
         public InteractionSystem InteractionSystem => _interactionSystem;
@@ -3149,15 +3998,21 @@ namespace Game.Runtime.World
         public void Initialize()
         {
             if (_context == null || _disposed) return;
-            _playerAnchor = new PlayerAnchor { Position = Vector2.zero };
             _chunkStreamer = new ChunkStreamer(_chunkSource, 30f);
-            _playerInput = new PlayerInput();
-            _playerMovement = new PlayerMovement(_playerAnchor, 5f);
             _interactionSystem = new InteractionSystem();
-            _enemySystem = new EnemySystem();
+            _enemyConfigDatabase = Resources.Load<EnemyConfigDatabase>("EnemyConfigDatabase");
+            _combatSystem = new CombatSystem();
+            _combatSystem.OnCombatantDeath += _ => Log.Info("[Combat] Enemy died");
+            _playerSystem = new PlayerSystem(_combatSystem, _interactionSystem);
+            PlayerSystemRegistry.Set(_playerSystem);
+            _playerSystem.Initialize();
+            _enemySystem = new EnemySystem(_enemyConfigDatabase, _combatSystem, () => _playerSystem.GetPosition());
             EnemySystemRegistry.Set(_enemySystem);
-            _playerRuntime = new PlayerRuntime(_playerAnchor);
-            _playerRuntime.Initialize();
+            _playerCombatProbe = new PlayerCombatProbe(_combatSystem, () => _playerSystem.GetPosition(), CombatDetectionRadius, _playerSystem.PlayerRuntime);
+            _abilitySystem = new AbilitySystem(_combatSystem, _playerSystem.PlayerRuntime);
+            foreach (var config in Resources.LoadAll<AbilityConfig>(""))
+                _abilitySystem.AddAbility(config);
+            _autoCombatResolver = new AutoCombatResolver(_combatSystem, _playerCombatProbe, _playerSystem.PlayerRuntime, _abilitySystem, CombatAttackInterval);
             _context.isInitialized = true;
             InteractionSystemRegistry.Set(_interactionSystem);
             OnWorldRuntimeReady?.Invoke();
@@ -3167,19 +4022,19 @@ namespace Game.Runtime.World
         {
             if (_context == null || !_context.isInitialized || _disposed) return;
 
-            _chunkStreamer?.UpdateStreaming(_playerAnchor.Position);
-
-            Vector2 input = _playerInput.ReadMoveInput();
-            _playerMovement.ApplyMovement(input, dt);
+            _chunkStreamer?.UpdateStreaming(_playerSystem.GetPosition());
 
             if (UnityEngine.Input.GetKeyDown(KeyCode.E))
             {
-                var request = new InteractionRequest { origin = _playerAnchor.Position, radius = InteractionRequestRadius };
+                var request = new InteractionRequest { origin = _playerSystem.GetPosition(), radius = InteractionRequestRadius };
                 _interactionSystem.TryInteract(request);
             }
 
             _enemySystem?.Tick(dt);
-            _playerRuntime?.Tick(dt);
+            _playerCombatProbe?.Tick(dt);
+            _abilitySystem?.Tick(dt);
+            _autoCombatResolver?.Tick(dt);
+            _playerSystem?.Tick(dt);
         }
 
         public void Dispose()
@@ -3188,15 +4043,17 @@ namespace Game.Runtime.World
             _disposed = true;
             OnWorldRuntimeDisposed?.Invoke();
             InteractionSystemRegistry.Clear();
-            _playerRuntime?.Dispose();
-            _playerRuntime = null;
-            _playerInput = null;
-            _playerMovement = null;
+            PlayerSystemRegistry.Clear();
+            _playerSystem?.Dispose();
+            _playerSystem = null;
             _interactionSystem = null;
             EnemySystemRegistry.Clear();
             _enemySystem = null;
+            _autoCombatResolver = null;
+            _abilitySystem = null;
+            _playerCombatProbe = null;
+            _combatSystem = null;
             _chunkStreamer = null;
-            _playerAnchor = null;
             _chunkSource = null;
             _context = null;
         }
@@ -3473,6 +4330,167 @@ namespace Game.Runtime.World.Chunks
                 if (c != null && c.bounds.Intersects(area))
                     yield return c;
             }
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/View/Camera/CameraFollow.cs
+
+using UnityEngine;
+
+namespace Game.View.Camera
+{
+    /// <summary>
+    /// Follows target transform. Updates camera position every frame (PHASE 16).
+    /// </summary>
+    public class CameraFollow : MonoBehaviour
+    {
+        [SerializeField] private Transform _target;
+        [SerializeField] private float _zOffset = -10f;
+
+        public Transform Target
+        {
+            get => _target;
+            set => _target = value;
+        }
+
+        private void LateUpdate()
+        {
+            if (_target == null) return;
+            var p = _target.position;
+            transform.position = new Vector3(p.x, p.y, p.z + _zOffset);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/View/Enemy/EnemyView.cs
+
+using UnityEngine;
+
+namespace Game.View.Enemy
+{
+    /// <summary>
+    /// View-only: SpriteRenderer and SetPosition. No logic (PHASE 17).
+    /// </summary>
+    public class EnemyView : MonoBehaviour
+    {
+        [SerializeField] private SpriteRenderer _spriteRenderer;
+
+        public SpriteRenderer SpriteRenderer => _spriteRenderer;
+
+        private void Awake()
+        {
+            if (_spriteRenderer == null)
+                _spriteRenderer = GetComponent<SpriteRenderer>();
+            if (_spriteRenderer == null)
+                _spriteRenderer = gameObject.AddComponent<SpriteRenderer>();
+        }
+
+        public void SetPosition(Vector2 worldPos)
+        {
+            transform.position = new Vector3(worldPos.x, worldPos.y, transform.position.z);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/View/Enemy/EnemyViewBinder.cs
+
+using Game.Runtime.Enemy;
+
+namespace Game.View.Enemy
+{
+    /// <summary>
+    /// Binds EnemyRuntime to EnemyView. Tick: view.SetPosition(runtime.Position) (PHASE 17).
+    /// </summary>
+    public class EnemyViewBinder
+    {
+        private readonly EnemyRuntime _runtime;
+        private readonly EnemyView _view;
+
+        public EnemyViewBinder(EnemyRuntime runtime, EnemyView view)
+        {
+            _runtime = runtime;
+            _view = view;
+        }
+
+        public void Tick()
+        {
+            if (_runtime != null && _view != null && _runtime.isAlive)
+                _view.SetPosition(_runtime.Position);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/View/Player/PlayerView.cs
+
+using UnityEngine;
+
+namespace Game.View.Player
+{
+    /// <summary>
+    /// View-only: SpriteRenderer and SetPosition. No logic (PHASE 16).
+    /// </summary>
+    public class PlayerView : MonoBehaviour
+    {
+        [SerializeField] private SpriteRenderer _spriteRenderer;
+
+        public SpriteRenderer SpriteRenderer => _spriteRenderer;
+
+        private void Awake()
+        {
+            if (_spriteRenderer == null)
+                _spriteRenderer = GetComponent<SpriteRenderer>();
+            if (_spriteRenderer == null)
+                _spriteRenderer = gameObject.AddComponent<SpriteRenderer>();
+        }
+
+        public void SetPosition(Vector2 worldPos)
+        {
+            transform.position = new Vector3(worldPos.x, worldPos.y, transform.position.z);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/View/Player/PlayerViewBinder.cs
+
+using UnityEngine;
+using Game.Runtime.Player;
+
+namespace Game.View.Player
+{
+    /// <summary>
+    /// Binds PlayerRuntime to PlayerView. Tick: view.SetPosition(runtime.Position) (PHASE 16).
+    /// </summary>
+    public class PlayerViewBinder
+    {
+        private readonly PlayerRuntime _runtime;
+        private readonly PlayerView _view;
+
+        public PlayerViewBinder(PlayerRuntime runtime, PlayerView view)
+        {
+            _runtime = runtime;
+            _view = view;
+        }
+
+        public void Tick()
+        {
+            if (_runtime != null && _view != null)
+                _view.SetPosition(_runtime.Position);
         }
     }
 }

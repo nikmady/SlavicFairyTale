@@ -1,47 +1,52 @@
 using UnityEngine;
+using Game.Runtime.Combat;
 
 namespace Game.Runtime.Enemy
 {
     /// <summary>
-    /// Runtime enemy entity. Creates/destroys view, holds position. No combat/AI in PHASE 11B.
-    /// Does not know about world or player.
+    /// Runtime enemy entity. Config, health, position, movement params. View bound from outside. Implements ICombatant (PHASE 17).
     /// </summary>
     public class EnemyRuntime : ICombatant
     {
-        public string enemyId { get; }
-        public Vector2 position { get; set; }
-        public EnemyView view { get; private set; }
+        public EnemyConfig Config { get; }
+        public string enemyId => Config != null ? Config.enemyId : string.Empty;
+        public Vector2 Position { get; set; }
+        public float MoveSpeed { get; private set; }
+        public float AggroRadius { get; private set; }
+        public float StopDistance { get; private set; }
+        public Vector2 TargetOffset { get; private set; }
         public bool isAlive { get; set; }
         public string spawnChunkId { get; }
 
-        Vector2 ICombatant.Position => position;
-        bool ICombatant.IsAlive => isAlive;
+        /// <summary>Current health. Initialized from Config.maxHealth.</summary>
+        public float currentHealth { get; set; }
 
-        private GameObject _root;
+        public float maxHealth => Config != null ? Config.maxHealth : 0f;
+
+        Vector2 ICombatant.WorldPosition => Position;
+        bool ICombatant.IsAlive => isAlive;
+        CombatStats ICombatant.Stats => new CombatStats { maxHealth = maxHealth, currentHealth = currentHealth, attackPower = 0f };
+
+        void ICombatant.TakeDamage(float damage)
+        {
+            currentHealth -= damage;
+            if (currentHealth <= 0f)
+                isAlive = false;
+        }
+
         private bool _disposed;
 
-        public EnemyRuntime(string enemyId, Vector2 position, string spawnChunkId = null)
+        public EnemyRuntime(EnemyConfig config, Vector2 position, string spawnChunkId = null)
         {
-            this.enemyId = enemyId;
-            this.position = position;
+            Config = config;
+            Position = position;
             this.spawnChunkId = spawnChunkId ?? string.Empty;
+            currentHealth = config != null ? config.maxHealth : 0f;
             isAlive = true;
-        }
-
-        public void Initialize()
-        {
-            if (_disposed) return;
-
-            _root = new GameObject($"Enemy_{enemyId}");
-            _root.transform.position = new Vector3(position.x, position.y, 0f);
-            view = _root.AddComponent<EnemyView>();
-        }
-
-        public void Tick(float dt)
-        {
-            if (_root == null || view == null || _disposed) return;
-
-            _root.transform.position = new Vector3(position.x, position.y, 0f);
+            MoveSpeed = config != null ? config.moveSpeed : 3f;
+            AggroRadius = config != null ? config.aggroRadius : 10f;
+            StopDistance = config != null ? config.stopDistance : 1.5f;
+            TargetOffset = Random.insideUnitCircle * 1.2f;
         }
 
         public void Dispose()
@@ -49,10 +54,6 @@ namespace Game.Runtime.Enemy
             if (_disposed) return;
             _disposed = true;
             isAlive = false;
-            if (_root != null)
-                Object.Destroy(_root);
-            _root = null;
-            view = null;
         }
     }
 }

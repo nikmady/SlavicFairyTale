@@ -5,11 +5,6 @@ using Game.Runtime.Services;
 
 namespace Game.Runtime.Enemy
 {
-    /// <summary>
-    /// On chunk root. Registers EnemySpawnPoint with EnemySystem on enable; despawns all on disable.
-    /// Supports late binding: if EnemySystem is not ready, subscribes to OnReady then registers.
-    /// Chunk fully owns the lifecycle of spawned enemies.
-    /// </summary>
     public class ChunkEnemyRegistrar : MonoBehaviour
     {
         private readonly List<EnemyRuntime> _spawnedEnemies = new List<EnemyRuntime>();
@@ -26,7 +21,7 @@ namespace Game.Runtime.Enemy
             {
                 if (sp == null || string.IsNullOrEmpty(sp.enemyId)) continue;
                 var pos = (Vector2)sp.transform.position;
-                var enemy = system.SpawnEnemy(sp.enemyId, pos);
+                var enemy = system.SpawnEnemy(sp.enemyId, pos, gameObject.name);
                 if (enemy != null)
                     _spawnedEnemies.Add(enemy);
             }
@@ -57,12 +52,19 @@ namespace Game.Runtime.Enemy
             if (_isRegistered) return;
 
             if (EnemySystemRegistry.Current != null)
-                RegisterAll();
+                StartCoroutine(RegisterNextFrame());
             else
             {
                 _subscribedToReady = true;
                 EnemySystemRegistry.OnReady += OnEnemySystemReady;
             }
+        }
+
+        private System.Collections.IEnumerator RegisterNextFrame()
+        {
+            yield return null;
+            if (_isRegistered) yield break;
+            RegisterAll();
         }
 
         private void OnEnemySystemReady()
@@ -71,7 +73,7 @@ namespace Game.Runtime.Enemy
             if (_isRegistered) return;
             _subscribedToReady = false;
             EnemySystemRegistry.OnReady -= OnEnemySystemReady;
-            RegisterAll();
+            StartCoroutine(RegisterNextFrame());
         }
 
         private void OnDisable()
