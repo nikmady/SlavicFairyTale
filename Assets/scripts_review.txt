@@ -1,0 +1,3482 @@
+# Export: 2026-02-07 05:27:51
+# Source: Assets/Scripts
+# Files: 61
+
+
+
+==========
+
+# FILE: Game/Bootstrap/GameRoot.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+using Game.Runtime.Services;
+using Game.Runtime.Contexts;
+using Game.Runtime.World;
+using Game.Bootstrap.States;
+
+namespace Game.Bootstrap
+{
+    /// <summary>
+    /// Composition Root of the game. Single entry point: owns bootstrap, tick loop, meta, and state machine.
+    /// Does NOT contain gameplay logic — only wiring and lifecycle.
+    /// Future extension point: WorldRuntime, ChunkStreamer, PlayerRuntime will be injected or created here (not yet).
+    /// </summary>
+    public class GameRoot : MonoBehaviour, IGameBootstrap
+    {
+        private readonly List<ITickable> _tickables = new List<ITickable>();
+        private HeartbeatService _heartbeatService;
+        private GameStateMachine _stateMachine;
+        private SaveService _saveService;
+        private MetaContext _meta;
+        private WorldGraphRuntime _currentWorldGraph;
+        private WorldRuntime _worldRuntime;
+
+        // --- Extension points (reserved for future systems; do not assign yet) ---
+        // WorldRuntime: runtime representation of the loaded world (chunk-based, non-scene).
+        // ChunkStreamer: load/unload addressable chunk prefabs by player position.
+        // PlayerRuntime: player entity and position; drives chunk streaming.
+        private object _worldRuntimeReserved;
+        private object _chunkStreamerReserved;
+        private object _playerRuntimeReserved;
+
+        /// <summary>For future use: inject or create WorldRuntime from this root. Currently unused.</summary>
+        protected void SetWorldRuntimeReserved(object reserved) => _worldRuntimeReserved = reserved;
+
+        /// <summary>For future use: inject or create ChunkStreamer from this root. Currently unused.</summary>
+        protected void SetChunkStreamerReserved(object reserved) => _chunkStreamerReserved = reserved;
+
+        /// <summary>For future use: inject or create PlayerRuntime from this root. Currently unused.</summary>
+        protected void SetPlayerRuntimeReserved(object reserved) => _playerRuntimeReserved = reserved;
+
+        public float ElapsedTime => _heartbeatService != null ? _heartbeatService.ElapsedTime : 0f;
+        public int TotalTicks => _heartbeatService != null ? _heartbeatService.TickCount : 0;
+        public GameStateMachine StateMachine => _stateMachine;
+        public string CurrentStateId => _stateMachine != null ? _stateMachine.CurrentStateId : string.Empty;
+        public MetaContext Meta => _meta;
+        public SaveService Save => _saveService;
+        public WorldGraphRuntime CurrentWorldGraph => _currentWorldGraph;
+        public WorldRuntime CurrentWorldRuntime => _worldRuntime;
+        public string SelectedWorldNodeId { get; set; }
+
+        public void CreateWorldRuntime(string locationId, string biomeId)
+        {
+            DestroyWorldRuntime();
+            _worldRuntime = WorldBootstrap.CreateWorld(locationId, biomeId);
+        }
+
+        public void DestroyWorldRuntime()
+        {
+            if (_worldRuntime != null)
+            {
+                _worldRuntime.Dispose();
+                _worldRuntime = null;
+            }
+        }
+
+        public void SetCurrentWorldGraph(WorldGraphRuntime graph)
+        {
+            _currentWorldGraph = graph;
+        }
+
+        public void ClearCurrentWorldGraph()
+        {
+            _currentWorldGraph = null;
+        }
+
+        private void Awake()
+        {
+            DontDestroyOnLoad(gameObject);
+            _heartbeatService = new HeartbeatService();
+            _tickables.Add(_heartbeatService);
+        }
+
+        private void Start()
+        {
+            _saveService = new SaveService();
+            _stateMachine = new GameStateMachine();
+            _stateMachine.Register(new BootState(_stateMachine, (IGameBootstrap)this));
+            _stateMachine.Register(new MetaHubState(_stateMachine));
+            _stateMachine.Register(new WorldMapState(_stateMachine, this));
+            _stateMachine.Register(new LoadLocationState(_stateMachine, this));
+            _stateMachine.Register(new RunLocationState(_stateMachine, this));
+            _stateMachine.Register(new RunEndState(_stateMachine, this));
+            _stateMachine.SetInitialState("Boot");
+        }
+
+        private void Update()
+        {
+            float dt = Time.deltaTime;
+            for (int i = 0; i < _tickables.Count; i++)
+            {
+                _tickables[i].Tick(dt);
+            }
+            _stateMachine?.Tick(dt);
+        }
+
+        public void ResetHeartbeat()
+        {
+            if (_heartbeatService != null)
+                _heartbeatService.Reset();
+        }
+
+        public string GetHeartbeatStatus()
+        {
+            return _heartbeatService != null ? _heartbeatService.GetStatusString() : "N/A";
+        }
+
+        public void LoadMeta()
+        {
+            LoadMetaFromSave();
+        }
+
+        public MetaContext GetMeta()
+        {
+            return _meta;
+        }
+
+        public void LoadMetaFromSave()
+        {
+            MetaContext loaded = _saveService != null ? _saveService.LoadMeta() : null;
+            if (loaded != null)
+            {
+                _meta = loaded;
+                _meta.WireChangeCallbacks();
+                Log.Info("MetaContext loaded from save.");
+            }
+            else
+            {
+                _meta = MetaContext.CreateDefault();
+                Log.Info("New MetaContext created (no save).");
+            }
+        }
+
+        public void ReloadMetaFromDisk()
+        {
+            LoadMetaFromSave();
+        }
+
+        public void WipeProgress()
+        {
+            _saveService?.DeleteMetaSave();
+            LoadMetaFromSave();
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/GameRootInstaller.cs
+
+using UnityEngine;
+using Game.Runtime.Services;
+
+namespace Game.Bootstrap
+{
+    [DefaultExecutionOrder(-10000)]
+    public class GameRootInstaller : MonoBehaviour
+    {
+        private static readonly string PrefabPath = "GameRoot";
+
+        private void Awake()
+        {
+            if (FindObjectOfType<GameRoot>() != null)
+                return;
+
+            GameObject prefab = Resources.Load<GameObject>(PrefabPath);
+            if (prefab == null)
+            {
+                Log.Error($"GameRoot prefab not found at Resources/{PrefabPath}. Place GameRoot.prefab in Assets/Resources/.");
+                return;
+            }
+
+            Instantiate(prefab);
+            Log.Info("GameRoot instantiated from prefab.");
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/GameStateMachine.cs
+
+using System.Collections.Generic;
+using Game.Bootstrap.States;
+using Game.Runtime.Services;
+
+namespace Game.Bootstrap
+{
+    public class GameStateMachine
+    {
+        private readonly Dictionary<string, IGameState> _states = new Dictionary<string, IGameState>();
+        private IGameState _currentState;
+
+        public string CurrentStateId => _currentState?.StateId ?? string.Empty;
+
+        public void Register(IGameState state)
+        {
+            if (state == null) return;
+            _states[state.StateId] = state;
+        }
+
+        public void SetInitialState(string stateId)
+        {
+            if (_states.TryGetValue(stateId, out IGameState state))
+            {
+                _currentState = state;
+                _currentState.Enter();
+            }
+        }
+
+        public void SwitchState(string stateId)
+        {
+            if (!_states.TryGetValue(stateId, out IGameState nextState))
+                return;
+
+            string previousId = _currentState?.StateId ?? "none";
+            if (previousId == stateId)
+                return;
+
+            _currentState?.Exit();
+            _currentState = nextState;
+            _currentState.Enter();
+            Log.Info($"State change: {previousId} -> {stateId}");
+        }
+
+        public void Tick(float deltaTime)
+        {
+            _currentState?.Tick(deltaTime);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/IGameBootstrap.cs
+
+using Game.Runtime.Contexts;
+
+namespace Game.Bootstrap
+{
+    public interface IGameBootstrap
+    {
+        void LoadMeta();
+        MetaContext GetMeta();
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/States/BootState.cs
+
+using Game.Runtime.Services;
+using Game.Bootstrap;
+
+namespace Game.Bootstrap.States
+{
+    public class BootState : IGameState
+    {
+        private readonly GameStateMachine _machine;
+        private readonly IGameBootstrap _bootstrap;
+
+        public string StateId => "Boot";
+
+        public BootState(GameStateMachine machine)
+        {
+            _machine = machine;
+            _bootstrap = null;
+        }
+
+        public BootState(GameStateMachine machine, IGameBootstrap bootstrap)
+        {
+            _machine = machine;
+            _bootstrap = bootstrap;
+        }
+
+        public void Enter()
+        {
+            Log.Info("Enter Boot");
+            if (_bootstrap != null)
+                _bootstrap.LoadMeta();
+        }
+
+        public void Exit()
+        {
+            Log.Info("Exit Boot");
+        }
+
+        public void Tick(float deltaTime)
+        {
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/States/IGameState.cs
+
+namespace Game.Bootstrap.States
+{
+    public interface IGameState
+    {
+        string StateId { get; }
+        void Enter();
+        void Exit();
+        void Tick(float deltaTime);
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/States/LoadLocationState.cs
+
+using UnityEngine;
+using Game.Runtime.Services;
+using Game.Runtime.World;
+using Game.Runtime.World.Chunks;
+using Game.Bootstrap;
+
+namespace Game.Bootstrap.States
+{
+    /// <summary>
+    /// Single point where the playable world is loaded. No other state must perform world load.
+    /// Future: BeginLoadLocation will trigger chunk/addressable load for the given nodeId;
+    /// CompleteLoadLocation will run when load is done and transition to RunLocation.
+    /// Currently: no scene load, no chunks, no addressables — only logging.
+    /// </summary>
+    public class LoadLocationState : IGameState
+    {
+        private readonly GameStateMachine _machine;
+        private readonly GameRoot _gameRoot;
+
+        public string StateId => "LoadLocation";
+
+        public LoadLocationState(GameStateMachine machine)
+        {
+            _machine = machine;
+            _gameRoot = null;
+        }
+
+        public LoadLocationState(GameStateMachine machine, GameRoot gameRoot)
+        {
+            _machine = machine;
+            _gameRoot = gameRoot;
+        }
+
+        public void Enter()
+        {
+            Log.Info("Enter LoadLocation");
+            string nodeId = _gameRoot?.SelectedWorldNodeId ?? "";
+            Log.Info($"Preparing location: {nodeId}");
+            BeginLoadLocation(nodeId);
+            SetChunkSourceForLocation(nodeId);
+            CompleteLoadLocation();
+        }
+
+        public void Exit()
+        {
+            Log.Info("Exit LoadLocation");
+        }
+
+        public void Tick(float deltaTime)
+        {
+        }
+
+        /// <summary>
+        /// Single point of world creation. Creates WorldRuntime via GameRoot (WorldBootstrap).
+        /// TODO: Resolve LocationChunkSet by locationId here in future; set via WorldRuntime.SetChunkSource.
+        /// Future: load addressable chunks by nodeId, show loading UI, then call CompleteLoadLocation.
+        /// </summary>
+        private void BeginLoadLocation(string nodeId)
+        {
+            if (string.IsNullOrEmpty(nodeId) || _gameRoot == null) return;
+            string biomeId = "default";
+            var graph = _gameRoot.CurrentWorldGraph;
+            var node = graph?.Data?.GetNode(nodeId);
+            if (node != null && !string.IsNullOrEmpty(node.biomeId))
+                biomeId = node.biomeId;
+            _gameRoot.CreateWorldRuntime(nodeId, biomeId);
+        }
+
+        /// <summary>
+        /// Resolve LocationChunkSet for locationId and set on WorldRuntime. Streaming works with zero chunks if none found.
+        /// </summary>
+        private void SetChunkSourceForLocation(string locationId)
+        {
+            var world = _gameRoot?.CurrentWorldRuntime;
+            if (world == null) return;
+            var sets = Resources.LoadAll<LocationChunkSet>("");
+            LocationChunkSet chunkSet = null;
+            foreach (var set in sets)
+            {
+                if (set != null && set.locationId == locationId)
+                {
+                    chunkSet = set;
+                    break;
+                }
+            }
+            if (chunkSet != null)
+                world.SetChunkSource(chunkSet);
+            else
+                Log.Warn($"No LocationChunkSet found for locationId '{locationId}'; chunk streaming will have zero chunks.");
+        }
+
+        /// <summary>
+        /// Called when world is ready. Transition to RunLocation.
+        /// Future: finalize streamed chunks, spawn player, then switch.
+        /// </summary>
+        private void CompleteLoadLocation()
+        {
+            _machine?.SwitchState("RunLocation");
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/States/MetaHubState.cs
+
+using Game.Runtime.Services;
+
+namespace Game.Bootstrap.States
+{
+    public class MetaHubState : IGameState
+    {
+        private readonly GameStateMachine _machine;
+
+        public string StateId => "MetaHub";
+
+        public MetaHubState(GameStateMachine machine)
+        {
+            _machine = machine;
+        }
+
+        public void Enter()
+        {
+            Log.Info("Enter MetaHub");
+        }
+
+        public void Exit()
+        {
+            Log.Info("Exit MetaHub");
+        }
+
+        public void Tick(float deltaTime)
+        {
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/States/RunEndState.cs
+
+using Game.Runtime.Services;
+using Game.Bootstrap;
+
+namespace Game.Bootstrap.States
+{
+    public class RunEndState : IGameState
+    {
+        private readonly GameStateMachine _machine;
+        private readonly GameRoot _gameRoot;
+
+        public string StateId => "RunEnd";
+
+        public RunEndState(GameStateMachine machine)
+        {
+            _machine = machine;
+            _gameRoot = null;
+        }
+
+        public RunEndState(GameStateMachine machine, GameRoot gameRoot)
+        {
+            _machine = machine;
+            _gameRoot = gameRoot;
+        }
+
+        public void Enter()
+        {
+            Log.Info("Enter RunEnd");
+            _gameRoot?.DestroyWorldRuntime();
+            Log.Info("WorldRuntime disposed");
+        }
+
+        public void Exit()
+        {
+            Log.Info("Exit RunEnd");
+        }
+
+        public void Tick(float deltaTime)
+        {
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/States/RunLocationState.cs
+
+using Game.Runtime.Services;
+using Game.Bootstrap;
+
+namespace Game.Bootstrap.States
+{
+    public class RunLocationState : IGameState
+    {
+        private readonly GameStateMachine _machine;
+        private readonly GameRoot _gameRoot;
+
+        public string StateId => "RunLocation";
+
+        public RunLocationState(GameStateMachine machine)
+        {
+            _machine = machine;
+            _gameRoot = null;
+        }
+
+        public RunLocationState(GameStateMachine machine, GameRoot gameRoot)
+        {
+            _machine = machine;
+            _gameRoot = gameRoot;
+        }
+
+        public void Enter()
+        {
+            Log.Info("Enter RunLocation");
+            var world = _gameRoot?.CurrentWorldRuntime;
+            if (world?.Context != null)
+                Log.Info($"WorldRuntime active for location {world.Context.locationId}");
+        }
+
+        public void Exit()
+        {
+            Log.Info("Exit RunLocation");
+        }
+
+        public void Tick(float deltaTime)
+        {
+            _gameRoot?.CurrentWorldRuntime?.Tick(deltaTime);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Bootstrap/States/WorldMapState.cs
+
+using Game.Runtime.Services;
+using Game.Runtime.World;
+using Game.Bootstrap;
+
+namespace Game.Bootstrap.States
+{
+    public class WorldMapState : IGameState
+    {
+        private readonly GameStateMachine _machine;
+        private readonly GameRoot _gameRoot;
+        private WorldGraphRuntime _runtime;
+
+        public string StateId => "WorldMap";
+
+        public WorldMapState(GameStateMachine machine)
+        {
+            _machine = machine;
+            _gameRoot = null;
+        }
+
+        public WorldMapState(GameStateMachine machine, GameRoot gameRoot)
+        {
+            _machine = machine;
+            _gameRoot = gameRoot;
+        }
+
+        public void Enter()
+        {
+            Log.Info("Enter WorldMap");
+            if (_gameRoot?.Meta == null)
+            {
+                Log.Warn("WorldMapState entered without MetaContext");
+                return;
+            }
+            WorldGraphData data = DefaultWorldGraph.Create();
+            _runtime = new WorldGraphRuntime(data, _gameRoot.Meta);
+            _gameRoot.SetCurrentWorldGraph(_runtime);
+        }
+
+        public void Exit()
+        {
+            Log.Info("Exit WorldMap");
+            // Не очищаем граф: он нужен при клике по узлу из RunLocation (переход LoadLocation) и в LoadLocationState.
+            _runtime = null;
+        }
+
+        public void Tick(float deltaTime)
+        {
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Editor/Phase01PrefabCreator.cs
+
+using UnityEngine;
+using UnityEditor;
+using UnityEngine.UI;
+using Game.Bootstrap;
+using Game.Presentation.UI;
+
+namespace Game.Editor
+{
+    public static class Phase01PrefabCreator
+    {
+        private const string PrefabsPath = "Assets/Prefabs";
+        private const string ResourcesPath = "Assets/Resources";
+        private const string GameRootPrefabName = "GameRoot";
+        private const string CanvasPrefabPath = "Assets/Prefabs/UI/GameRootCanvas.prefab";
+
+        [MenuItem("Game/Create Phase 1 Prefabs")]
+        public static void CreateAll()
+        {
+            CreateGameRootPrefab();
+            CreateGameRootCanvasPrefab();
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+            Debug.Log("[Game] Prefabs created (Phases 1–6). Setup: PHASE_01_TESTING.md. Phase 6 check: PHASE_06_TESTING.md.");
+        }
+
+        private static void CreateGameRootPrefab()
+        {
+            if (!AssetDatabase.IsValidFolder("Assets/Prefabs"))
+                AssetDatabase.CreateFolder("Assets", "Prefabs");
+            if (!AssetDatabase.IsValidFolder(ResourcesPath))
+                AssetDatabase.CreateFolder("Assets", "Resources");
+
+            GameObject root = new GameObject(GameRootPrefabName);
+            root.AddComponent<GameRoot>();
+
+            string prefabPath = $"{PrefabsPath}/{GameRootPrefabName}.prefab";
+            string resourcesPath = $"{ResourcesPath}/{GameRootPrefabName}.prefab";
+            PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+            PrefabUtility.SaveAsPrefabAsset(root, resourcesPath);
+            Object.DestroyImmediate(root);
+        }
+
+        private static void CreateGameRootCanvasPrefab()
+        {
+            if (!AssetDatabase.IsValidFolder("Assets/Prefabs/UI"))
+            {
+                if (!AssetDatabase.IsValidFolder("Assets/Prefabs"))
+                    AssetDatabase.CreateFolder("Assets", "Prefabs");
+                AssetDatabase.CreateFolder("Assets/Prefabs", "UI");
+            }
+
+            GameObject canvasGo = new GameObject("Canvas");
+            Canvas canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvasGo.AddComponent<CanvasScaler>();
+            canvasGo.AddComponent<GraphicRaycaster>();
+
+            GameObject panelGo = new GameObject("Panel");
+            panelGo.transform.SetParent(canvasGo.transform, false);
+            RectTransform panelRect = panelGo.AddComponent<RectTransform>();
+            panelRect.anchorMin = new Vector2(0, 1);
+            panelRect.anchorMax = new Vector2(0, 1);
+            panelRect.pivot = new Vector2(0, 1);
+            panelRect.anchoredPosition = new Vector2(10, -10);
+            panelRect.sizeDelta = new Vector2(280, 720);
+
+            const float padding = 10f;
+            const float spacing = 8f;
+            const float textHeight = 24f;
+            const float buttonHeight = 102.64f;
+            const float width = 260f;
+            float y = -padding;
+
+            CreateText(panelGo.transform, "Title", "Game Debug Panel", 18, width, textHeight, ref y, spacing);
+            CreateText(panelGo.transform, "ElapsedTime", "Elapsed: 0.00s", 14, width, textHeight, ref y, spacing);
+            CreateText(panelGo.transform, "TickCount", "Ticks: 0", 14, width, textHeight, ref y, spacing);
+            CreateText(panelGo.transform, "CurrentState", "Current State: Boot", 14, width, textHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Reset Heartbeat", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Print Status", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Go Boot", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Go Hub", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Go WorldMap", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Go LoadLocation", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Go Run", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Go RunEnd", width, buttonHeight, ref y, spacing);
+            CreateText(panelGo.transform, "MetaSectionTitle", "META STATE", 16, width, textHeight, ref y, spacing);
+            CreateText(panelGo.transform, "MetaPlayerLevel", "Player Level: 0", 14, width, textHeight, ref y, spacing);
+            CreateText(panelGo.transform, "MetaTotalXP", "Total XP: 0", 14, width, textHeight, ref y, spacing);
+            CreateText(panelGo.transform, "MetaSelectedClass", "Selected Class: -", 14, width, textHeight, ref y, spacing);
+            CreateText(panelGo.transform, "MetaCurrencyGold", "Currency GOLD: 0", 14, width, textHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Add XP (+100)", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Add Gold (+50)", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Save Meta", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Reload Meta", width, buttonHeight, ref y, spacing);
+            CreateButton(panelGo.transform, "Wipe Progress", width, buttonHeight, ref y, spacing);
+            CreateText(panelGo.transform, "WorldMapSectionTitle", "WORLD MAP", 16, width, textHeight, ref y, spacing);
+            GameObject worldMapContent = new GameObject("WorldMapContent");
+            worldMapContent.transform.SetParent(panelGo.transform, false);
+            RectTransform wmcRect = worldMapContent.AddComponent<RectTransform>();
+            wmcRect.anchorMin = new Vector2(0, 1);
+            wmcRect.anchorMax = new Vector2(0, 1);
+            wmcRect.pivot = new Vector2(0.5f, 1f);
+            wmcRect.anchoredPosition = new Vector2(width * 0.5f, y);
+            wmcRect.sizeDelta = new Vector2(width, 400);
+            y -= 400 + spacing;
+            CreateButton(panelGo.transform, "Unlock Forest", width, buttonHeight, ref y, spacing);
+
+            GameRootPanel panel = panelGo.AddComponent<GameRootPanel>();
+            SerializedObject so = new SerializedObject(panel);
+            Text[] texts = panelGo.GetComponentsInChildren<Text>(true);
+            Button[] buttons = panelGo.GetComponentsInChildren<Button>(true);
+            RectTransform[] rects = panelGo.GetComponentsInChildren<RectTransform>(true);
+            RectTransform worldMapContentRect = null;
+            foreach (RectTransform r in rects)
+            {
+                if (r.gameObject.name == "WorldMapContent") { worldMapContentRect = r; break; }
+            }
+            if (texts.Length >= 10)
+            {
+                so.FindProperty("_elapsedTimeText").objectReferenceValue = texts[1];
+                so.FindProperty("_tickCountText").objectReferenceValue = texts[2];
+                so.FindProperty("_currentStateText").objectReferenceValue = texts[3];
+                so.FindProperty("_metaSectionTitleText").objectReferenceValue = texts[4];
+                so.FindProperty("_metaPlayerLevelText").objectReferenceValue = texts[5];
+                so.FindProperty("_metaTotalXPText").objectReferenceValue = texts[6];
+                so.FindProperty("_metaSelectedClassText").objectReferenceValue = texts[7];
+                so.FindProperty("_metaCurrencyGoldText").objectReferenceValue = texts[8];
+                so.FindProperty("_worldMapSectionTitleText").objectReferenceValue = texts[9];
+            }
+            if (worldMapContentRect != null)
+                so.FindProperty("_worldMapContent").objectReferenceValue = worldMapContentRect;
+            if (buttons.Length >= 14)
+            {
+                so.FindProperty("_resetHeartbeatButton").objectReferenceValue = buttons[0];
+                so.FindProperty("_printStatusButton").objectReferenceValue = buttons[1];
+                so.FindProperty("_goBootButton").objectReferenceValue = buttons[2];
+                so.FindProperty("_goHubButton").objectReferenceValue = buttons[3];
+                so.FindProperty("_goWorldMapButton").objectReferenceValue = buttons[4];
+                so.FindProperty("_goLoadLocationButton").objectReferenceValue = buttons[5];
+                so.FindProperty("_goRunButton").objectReferenceValue = buttons[6];
+                so.FindProperty("_goRunEndButton").objectReferenceValue = buttons[7];
+                so.FindProperty("_metaAddXPButton").objectReferenceValue = buttons[8];
+                so.FindProperty("_metaAddGoldButton").objectReferenceValue = buttons[9];
+                so.FindProperty("_metaSaveButton").objectReferenceValue = buttons[10];
+                so.FindProperty("_metaReloadButton").objectReferenceValue = buttons[11];
+                so.FindProperty("_wipeProgressButton").objectReferenceValue = buttons[12];
+                so.FindProperty("_worldMapUnlockForestButton").objectReferenceValue = buttons[13];
+            }
+            so.ApplyModifiedPropertiesWithoutUndo();
+
+            GameObject eventSystem = new GameObject("EventSystem");
+            eventSystem.AddComponent<UnityEngine.EventSystems.EventSystem>();
+            eventSystem.AddComponent<UnityEngine.EventSystems.StandaloneInputModule>();
+            eventSystem.transform.SetParent(canvasGo.transform);
+
+            GameObject bootstrapGo = new GameObject("GameBootstrap");
+            bootstrapGo.transform.SetParent(canvasGo.transform);
+            bootstrapGo.AddComponent<GameRootInstaller>();
+
+            PrefabUtility.SaveAsPrefabAsset(canvasGo, CanvasPrefabPath);
+            Object.DestroyImmediate(canvasGo);
+        }
+
+        private static GameObject CreateText(Transform parent, string name, string content, int fontSize, float width, float height, ref float y, float spacing)
+        {
+            GameObject go = new GameObject(name);
+            go.transform.SetParent(parent, false);
+            RectTransform rect = go.AddComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0, 1);
+            rect.anchorMax = new Vector2(0, 1);
+            rect.pivot = new Vector2(0.5f, 1f);
+            rect.anchoredPosition = new Vector2(width * 0.5f, y);
+            rect.sizeDelta = new Vector2(width, height);
+            y -= height + spacing;
+            Text text = go.AddComponent<Text>();
+            text.text = content;
+            text.fontSize = fontSize;
+            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            return go;
+        }
+
+        private static GameObject CreateButton(Transform parent, string label, float width, float height, ref float y, float spacing)
+        {
+            GameObject go = new GameObject("Button_" + label.Replace(" ", ""));
+            go.transform.SetParent(parent, false);
+            RectTransform rect = go.AddComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0, 1);
+            rect.anchorMax = new Vector2(0, 1);
+            rect.pivot = new Vector2(0.5f, 1f);
+            rect.anchoredPosition = new Vector2(width * 0.5f, y);
+            rect.sizeDelta = new Vector2(width, height);
+            y -= height + spacing;
+            Image image = go.AddComponent<Image>();
+            image.color = new Color(0.2f, 0.5f, 0.8f);
+            Button button = go.AddComponent<Button>();
+
+            GameObject textGo = new GameObject("Text");
+            textGo.transform.SetParent(go.transform, false);
+            RectTransform textRect = textGo.AddComponent<RectTransform>();
+            textRect.anchorMin = Vector2.zero;
+            textRect.anchorMax = Vector2.one;
+            textRect.offsetMin = Vector2.zero;
+            textRect.offsetMax = Vector2.zero;
+            Text text = textGo.AddComponent<Text>();
+            text.text = label;
+            text.fontSize = 14;
+            text.alignment = TextAnchor.MiddleCenter;
+            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            text.color = Color.white;
+
+            return go;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Editor/ScriptsToReviewExportWindow.cs
+
+using System.Collections.Generic;
+using System.IO;
+using UnityEditor;
+using UnityEngine;
+
+namespace Game.Editor
+{
+    public class ScriptsToReviewExportWindow : EditorWindow
+    {
+        private const string DefaultSourceFolder = "Assets/Scripts";
+        private const string DefaultOutputFile = "Assets/scripts_review.txt";
+        private const string FileSeparator = "\n\n" + "==========\n\n";
+
+        private string _sourceFolder = DefaultSourceFolder;
+        private string _outputPath = DefaultOutputFile;
+        private Vector2 _scrollPos;
+        private string _lastLog = "";
+
+        [MenuItem("Tools/Export Scripts to Review TXT")]
+        public static void ShowWindow()
+        {
+            var w = GetWindow<ScriptsToReviewExportWindow>("Scripts → Review TXT");
+            w.minSize = new Vector2(400, 200);
+        }
+
+        private void OnGUI()
+        {
+            GUILayout.Space(8);
+            EditorGUILayout.LabelField("Сбор всех .cs из папки в один TXT для ревью (например, в GPT).", EditorStyles.wordWrappedLabel);
+            GUILayout.Space(8);
+
+            _sourceFolder = EditorGUILayout.TextField("Папка с скриптами", _sourceFolder);
+            _outputPath = EditorGUILayout.TextField("Выходной TXT файл", _outputPath);
+
+            GUILayout.Space(8);
+            if (GUILayout.Button("Экспорт", GUILayout.Height(28)))
+                Export();
+
+            if (!string.IsNullOrEmpty(_lastLog))
+            {
+                GUILayout.Space(8);
+                _scrollPos = EditorGUILayout.BeginScrollView(_scrollPos, GUILayout.ExpandHeight(true));
+                EditorGUILayout.TextArea(_lastLog, EditorStyles.wordWrappedLabel);
+                EditorGUILayout.EndScrollView();
+            }
+        }
+
+        private void Export()
+        {
+            string projectPath = Application.dataPath;
+            if (projectPath.EndsWith("/Assets") || projectPath.EndsWith("\\Assets"))
+                projectPath = Path.GetDirectoryName(projectPath);
+            string sourceFull = Path.Combine(projectPath, _sourceFolder.Replace('/', Path.DirectorySeparatorChar));
+            if (!Directory.Exists(sourceFull))
+            {
+                _lastLog = $"Ошибка: папка не найдена:\n{sourceFull}";
+                return;
+            }
+
+            var files = new List<string>();
+            CollectCsFiles(sourceFull, sourceFull, files);
+
+            if (files.Count == 0)
+            {
+                _lastLog = $"В папке нет .cs файлов:\n{sourceFull}";
+                return;
+            }
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"# Export: {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            sb.AppendLine($"# Source: {_sourceFolder}");
+            sb.AppendLine($"# Files: {files.Count}");
+            sb.AppendLine();
+            sb.Append(FileSeparator);
+
+            foreach (string fullPath in files)
+            {
+                string relativePath = fullPath.Substring(sourceFull.Length).TrimStart(Path.DirectorySeparatorChar, '/').Replace('\\', '/');
+                sb.AppendLine($"# FILE: {relativePath}");
+                sb.AppendLine();
+                try
+                {
+                    string content = File.ReadAllText(fullPath);
+                    sb.Append(content);
+                }
+                catch (System.Exception e)
+                {
+                    sb.AppendLine($"# Read error: {e.Message}");
+                }
+                sb.Append(FileSeparator);
+            }
+
+            string outFull = Path.Combine(projectPath, _outputPath.Replace('/', Path.DirectorySeparatorChar));
+            string outDir = Path.GetDirectoryName(outFull);
+            if (!string.IsNullOrEmpty(outDir) && !Directory.Exists(outDir))
+                Directory.CreateDirectory(outDir);
+
+            try
+            {
+                File.WriteAllText(outFull, sb.ToString());
+                _lastLog = $"Готово.\nЗаписано файлов: {files.Count}\nПуть: {outFull}";
+                EditorUtility.RevealInFinder(outFull);
+            }
+            catch (System.Exception e)
+            {
+                _lastLog = $"Ошибка записи:\n{e.Message}";
+            }
+        }
+
+        private static void CollectCsFiles(string rootFull, string dirFull, List<string> result)
+        {
+            try
+            {
+                foreach (string f in Directory.GetFiles(dirFull, "*.cs"))
+                    result.Add(Path.GetFullPath(f));
+                foreach (string d in Directory.GetDirectories(dirFull))
+                    CollectCsFiles(rootFull, d, result);
+            }
+            catch { /* skip inaccessible */ }
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Presentation/UI/GameRootPanel.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+using Game.Bootstrap;
+using Game.Runtime.Services;
+using Game.Runtime.Contexts;
+using Game.Runtime.World;
+
+namespace Game.Presentation.UI
+{
+    public class GameRootPanel : MonoBehaviour
+    {
+        [SerializeField] private GameRoot _gameRoot;
+        [SerializeField] private Text _elapsedTimeText;
+        [SerializeField] private Text _tickCountText;
+        [SerializeField] private Text _currentStateText;
+        [SerializeField] private Button _resetHeartbeatButton;
+        [SerializeField] private Button _printStatusButton;
+        [SerializeField] private Button _goBootButton;
+        [SerializeField] private Button _goHubButton;
+        [SerializeField] private Button _goWorldMapButton;
+        [SerializeField] private Button _goLoadLocationButton;
+        [SerializeField] private Button _goRunButton;
+        [SerializeField] private Button _goRunEndButton;
+        [SerializeField] private Text _metaSectionTitleText;
+        [SerializeField] private Text _metaPlayerLevelText;
+        [SerializeField] private Text _metaTotalXPText;
+        [SerializeField] private Text _metaSelectedClassText;
+        [SerializeField] private Text _metaCurrencyGoldText;
+        [SerializeField] private Button _metaAddXPButton;
+        [SerializeField] private Button _metaAddGoldButton;
+        [SerializeField] private Button _metaSaveButton;
+        [SerializeField] private Button _metaReloadButton;
+        [SerializeField] private Button _wipeProgressButton;
+        [SerializeField] private Text _worldMapSectionTitleText;
+        [SerializeField] private RectTransform _worldMapContent;
+        [SerializeField] private Button _worldMapUnlockForestButton;
+
+        private const float WorldMapButtonHeight = 102.64f;
+        private const float WorldMapButtonPadding = 8f;
+
+        private bool _worldMapNeedsRefresh;
+        private string _lastStateId = "";
+
+        private void Awake()
+        {
+            if (_gameRoot == null)
+                _gameRoot = FindObjectOfType<GameRoot>();
+
+            if (_resetHeartbeatButton != null)
+                _resetHeartbeatButton.onClick.AddListener(OnResetHeartbeat);
+
+            if (_printStatusButton != null)
+                _printStatusButton.onClick.AddListener(OnPrintStatus);
+
+            if (_goBootButton != null)
+                _goBootButton.onClick.AddListener(() => OnGoState("Boot"));
+            if (_goHubButton != null)
+                _goHubButton.onClick.AddListener(() => OnGoState("MetaHub"));
+            if (_goWorldMapButton != null)
+                _goWorldMapButton.onClick.AddListener(() => OnGoState("WorldMap"));
+            if (_goLoadLocationButton != null)
+                _goLoadLocationButton.onClick.AddListener(() => OnGoState("LoadLocation"));
+            if (_goRunButton != null)
+                _goRunButton.onClick.AddListener(() => OnGoState("RunLocation"));
+            if (_goRunEndButton != null)
+                _goRunEndButton.onClick.AddListener(() => OnGoState("RunEnd"));
+
+            if (_metaAddXPButton != null)
+                _metaAddXPButton.onClick.AddListener(OnMetaAddXP);
+            if (_metaAddGoldButton != null)
+                _metaAddGoldButton.onClick.AddListener(OnMetaAddGold);
+            if (_metaSaveButton != null)
+                _metaSaveButton.onClick.AddListener(OnMetaSave);
+            if (_metaReloadButton != null)
+                _metaReloadButton.onClick.AddListener(OnMetaReload);
+
+            if (_wipeProgressButton != null)
+                _wipeProgressButton.onClick.AddListener(OnWipeProgress);
+
+            if (_worldMapUnlockForestButton != null)
+                _worldMapUnlockForestButton.onClick.AddListener(OnWorldMapUnlockForest);
+        }
+
+        private void Start()
+        {
+            if (_goWorldMapButton != null && _goWorldMapButton.transform.parent is RectTransform parentRt)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(parentRt);
+        }
+
+        private void Update()
+        {
+            if (_gameRoot == null) return;
+
+            if (_elapsedTimeText != null)
+                _elapsedTimeText.text = $"Elapsed: {_gameRoot.ElapsedTime:F2}s";
+
+            if (_tickCountText != null)
+                _tickCountText.text = $"Ticks: {_gameRoot.TotalTicks}";
+
+            if (_currentStateText != null)
+                _currentStateText.text = $"Current State: {_gameRoot.CurrentStateId}";
+
+            UpdateMetaTexts();
+            UpdateStateButtonsInteractable();
+
+            if (_gameRoot.CurrentStateId != _lastStateId)
+            {
+                if (_gameRoot.CurrentStateId == "WorldMap")
+                    _worldMapNeedsRefresh = true;
+                _lastStateId = _gameRoot.CurrentStateId;
+            }
+            if (_gameRoot.CurrentStateId == "WorldMap" && _gameRoot.CurrentWorldGraph != null && _worldMapNeedsRefresh)
+            {
+                RefreshWorldMap();
+                _worldMapNeedsRefresh = false;
+            }
+        }
+
+        private void UpdateMetaTexts()
+        {
+            MetaContext meta = _gameRoot.Meta;
+            if (meta == null) return;
+
+            if (_metaSectionTitleText != null)
+                _metaSectionTitleText.text = "META STATE";
+
+            if (_metaPlayerLevelText != null)
+                _metaPlayerLevelText.text = $"Player Level: {meta.progression.playerLevel}";
+
+            if (_metaTotalXPText != null)
+                _metaTotalXPText.text = $"Total XP: {meta.progression.totalXP}";
+
+            if (_metaSelectedClassText != null)
+                _metaSelectedClassText.text = $"Selected Class: {(string.IsNullOrEmpty(meta.progression.selectedClassId) ? "-" : meta.progression.selectedClassId)}";
+
+            if (_metaCurrencyGoldText != null)
+                _metaCurrencyGoldText.text = $"Currency GOLD: {meta.economy.GetAmount("GOLD")}";
+        }
+
+        private void UpdateStateButtonsInteractable()
+        {
+            if (_gameRoot?.StateMachine == null) return;
+            string current = _gameRoot.CurrentStateId;
+            SetButtonInteractable(_goBootButton, current != "Boot");
+            SetButtonInteractable(_goHubButton, current != "MetaHub");
+            SetButtonInteractable(_goWorldMapButton, current != "WorldMap");
+            SetButtonInteractable(_goLoadLocationButton, current != "LoadLocation");
+            SetButtonInteractable(_goRunButton, current != "RunLocation");
+            SetButtonInteractable(_goRunEndButton, current != "RunEnd");
+        }
+
+        private static void SetButtonInteractable(Button button, bool interactable)
+        {
+            if (button != null)
+                button.interactable = interactable;
+        }
+
+        private void OnGoState(string stateId)
+        {
+            if (_gameRoot?.StateMachine != null)
+                _gameRoot.StateMachine.SwitchState(stateId);
+        }
+
+        private void OnResetHeartbeat()
+        {
+            if (_gameRoot != null)
+            {
+                _gameRoot.ResetHeartbeat();
+                Log.Info("Heartbeat reset.");
+            }
+        }
+
+        private void OnPrintStatus()
+        {
+            if (_gameRoot != null)
+                Log.Info(_gameRoot.GetHeartbeatStatus());
+        }
+
+        private void OnMetaAddXP()
+        {
+            if (_gameRoot?.Meta == null) return;
+            _gameRoot.Meta.progression.AddXP(100);
+        }
+
+        private void OnMetaAddGold()
+        {
+            if (_gameRoot?.Meta == null) return;
+            _gameRoot.Meta.economy.AddCurrency("GOLD", 50);
+        }
+
+        private void OnMetaSave()
+        {
+            if (_gameRoot?.Meta == null || _gameRoot.Save == null) return;
+            _gameRoot.Save.SaveMeta(_gameRoot.Meta);
+        }
+
+        private void OnMetaReload()
+        {
+            if (_gameRoot == null) return;
+            _gameRoot.ReloadMetaFromDisk();
+        }
+
+        public void RefreshWorldMap()
+        {
+            if (_gameRoot?.CurrentWorldGraph == null || _worldMapContent == null) return;
+            for (int i = _worldMapContent.childCount - 1; i >= 0; i--)
+                Destroy(_worldMapContent.GetChild(i).gameObject);
+
+            if (_worldMapSectionTitleText != null)
+                _worldMapSectionTitleText.text = "WORLD MAP";
+
+            var graph = _gameRoot.CurrentWorldGraph;
+            MetaContext meta = _gameRoot.Meta;
+            string currentId = meta?.GetCurrentNodeId() ?? "";
+            IReadOnlyList<WorldNodeData> nodes = graph.GetAllNodes();
+            if (nodes == null) return;
+
+            Font font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            float yOffset = 0f;
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                WorldNodeData node = nodes[i];
+                if (node == null) continue;
+                bool isUnlocked = meta != null && meta.HasNodeUnlocked(node.nodeId);
+                bool isReachable = meta != null && graph.IsNodeReachable(meta.GetCurrentNodeId(), node.nodeId);
+                bool isCurrent = node.nodeId == currentId;
+
+                string label;
+                bool interactable;
+                if (!isUnlocked)
+                {
+                    label = "???";
+                    interactable = false;
+                }
+                else if (!isReachable)
+                {
+                    label = node.displayName + " (locked path)";
+                    interactable = false;
+                }
+                else
+                {
+                    label = node.displayName ?? node.nodeId;
+                    interactable = true;
+                }
+                if (isCurrent)
+                    label += " [CURRENT]";
+
+                Button btn = CreateWorldMapNodeButton(_worldMapContent, label, interactable, font, yOffset);
+                yOffset -= WorldMapButtonHeight + WorldMapButtonPadding;
+                string nodeId = node.nodeId;
+                btn.onClick.AddListener(() => OnSelectNode(nodeId));
+            }
+        }
+
+        private static Button CreateWorldMapNodeButton(RectTransform parent, string label, bool interactable, Font font, float yOffset)
+        {
+            const float width = 260f;
+            GameObject go = new GameObject("Node_" + label.Replace(" ", "_"));
+            go.transform.SetParent(parent, false);
+            RectTransform rect = go.AddComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0, 1);
+            rect.anchorMax = new Vector2(0, 1);
+            rect.pivot = new Vector2(0.5f, 1f);
+            rect.anchoredPosition = new Vector2(width * 0.5f, yOffset);
+            rect.sizeDelta = new Vector2(width, WorldMapButtonHeight);
+            Image img = go.AddComponent<Image>();
+            img.color = interactable ? new Color(0.25f, 0.6f, 0.3f) : new Color(0.3f, 0.3f, 0.3f);
+            Button btn = go.AddComponent<Button>();
+            btn.interactable = interactable;
+
+            GameObject textGo = new GameObject("Text");
+            textGo.transform.SetParent(go.transform, false);
+            RectTransform textRect = textGo.AddComponent<RectTransform>();
+            textRect.anchorMin = Vector2.zero;
+            textRect.anchorMax = Vector2.one;
+            textRect.offsetMin = Vector2.zero;
+            textRect.offsetMax = Vector2.zero;
+            Text text = textGo.AddComponent<Text>();
+            text.text = label;
+            text.fontSize = 13;
+            text.alignment = TextAnchor.MiddleCenter;
+            text.font = font;
+            text.color = Color.white;
+            return btn;
+        }
+
+        public void OnSelectNode(string nodeId)
+        {
+            if (_gameRoot == null || string.IsNullOrEmpty(nodeId)) return;
+            var graph = _gameRoot.CurrentWorldGraph;
+            var meta = _gameRoot.Meta;
+            if (graph == null || meta == null) return;
+            if (!graph.IsNodeReachable(meta.GetCurrentNodeId(), nodeId))
+            {
+                Log.Warn($"Cannot select node '{nodeId}': not reachable from current node.");
+                return;
+            }
+            meta.SetCurrentNode(nodeId);
+            _gameRoot.SelectedWorldNodeId = nodeId;
+            if (_gameRoot.StateMachine != null)
+                _gameRoot.StateMachine.SwitchState("LoadLocation");
+        }
+
+        private void OnWorldMapUnlockForest()
+        {
+            if (_gameRoot?.Meta?.unlocks == null) return;
+            _gameRoot.Meta.unlocks.UnlockNode("forest");
+            _worldMapNeedsRefresh = true;
+        }
+
+        private void OnWipeProgress()
+        {
+            if (_gameRoot == null) return;
+            _gameRoot.WipeProgress();
+            _worldMapNeedsRefresh = true;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Contexts/EconomyState.cs
+
+using System;
+using System.Collections.Generic;
+
+namespace Game.Runtime.Contexts
+{
+    [Serializable]
+    public class EconomyState
+    {
+        public List<CurrencyEntry> currenciesList = new List<CurrencyEntry>();
+        private Dictionary<string, int> _currencies;
+        private Action _onChanged;
+
+        public void SetOnChanged(Action callback)
+        {
+            _onChanged = callback;
+        }
+
+        private void EnsureCurrencies()
+        {
+            if (_currencies != null) return;
+            _currencies = new Dictionary<string, int>();
+            if (currenciesList == null) return;
+            foreach (var e in currenciesList)
+            {
+                if (e == null || string.IsNullOrEmpty(e.id)) continue;
+                _currencies[e.id] = e.amount;
+            }
+        }
+
+        private void SyncToList()
+        {
+            currenciesList.Clear();
+            if (_currencies == null) return;
+            foreach (var kv in _currencies)
+                currenciesList.Add(new CurrencyEntry { id = kv.Key, amount = kv.Value });
+        }
+
+        public void AddCurrency(string id, int amount)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            EnsureCurrencies();
+            if (_currencies.TryGetValue(id, out int current))
+                _currencies[id] = current + amount;
+            else
+                _currencies[id] = amount;
+            SyncToList();
+            _onChanged?.Invoke();
+        }
+
+        public void SpendCurrency(string id, int amount)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            EnsureCurrencies();
+            if (_currencies.TryGetValue(id, out int current))
+            {
+                int next = Math.Max(0, current - amount);
+                if (next == 0)
+                    _currencies.Remove(id);
+                else
+                    _currencies[id] = next;
+                SyncToList();
+                _onChanged?.Invoke();
+            }
+        }
+
+        public int GetAmount(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return 0;
+            EnsureCurrencies();
+            return _currencies.TryGetValue(id, out int amount) ? amount : 0;
+        }
+
+        [Serializable]
+        public class CurrencyEntry
+        {
+            public string id;
+            public int amount;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Contexts/HubState.cs
+
+using System;
+using System.Collections.Generic;
+
+namespace Game.Runtime.Contexts
+{
+    [Serializable]
+    public class HubState
+    {
+        public List<BuildingEntry> buildingsList = new List<BuildingEntry>();
+        private Dictionary<string, int> _buildings;
+        private Action _onChanged;
+
+        public void SetOnChanged(Action callback)
+        {
+            _onChanged = callback;
+        }
+
+        private void EnsureBuildings()
+        {
+            if (_buildings != null) return;
+            _buildings = new Dictionary<string, int>();
+            if (buildingsList == null) return;
+            foreach (var e in buildingsList)
+            {
+                if (e == null || string.IsNullOrEmpty(e.buildingId)) continue;
+                _buildings[e.buildingId] = e.level;
+            }
+        }
+
+        private void SyncToList()
+        {
+            buildingsList.Clear();
+            if (_buildings == null) return;
+            foreach (var kv in _buildings)
+                buildingsList.Add(new BuildingEntry { buildingId = kv.Key, level = kv.Value });
+        }
+
+        public void Build(string buildingId)
+        {
+            if (string.IsNullOrEmpty(buildingId)) return;
+            EnsureBuildings();
+            if (!_buildings.ContainsKey(buildingId))
+                _buildings[buildingId] = 1;
+            else
+                _buildings[buildingId]++;
+            SyncToList();
+            _onChanged?.Invoke();
+        }
+
+        public void Upgrade(string buildingId)
+        {
+            if (string.IsNullOrEmpty(buildingId)) return;
+            EnsureBuildings();
+            if (_buildings.TryGetValue(buildingId, out int level))
+            {
+                _buildings[buildingId] = level + 1;
+                SyncToList();
+                _onChanged?.Invoke();
+            }
+        }
+
+        [Serializable]
+        public class BuildingEntry
+        {
+            public string buildingId;
+            public int level;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Contexts/IContext.cs
+
+namespace Game.Runtime.Contexts
+{
+    public interface IContext
+    {
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Contexts/MetaContext.cs
+
+using System;
+
+namespace Game.Runtime.Contexts
+{
+    /// <summary>
+    /// Pure persistent data: progression, economy, hub, unlocks, current world node.
+    /// Rules: no UnityEngine references, no scenes, no runtime GameObjects or MonoBehaviours.
+    /// Serialized to JSON and loaded/saved by SaveService. Safe to pass across layers.
+    /// </summary>
+    [Serializable]
+    public class MetaContext
+    {
+        public PlayerProgression progression = new PlayerProgression();
+        public EconomyState economy = new EconomyState();
+        public HubState hub = new HubState();
+        public UnlockState unlocks = new UnlockState();
+        public string currentWorldNodeId;
+
+        public event Action OnMetaChanged;
+
+        public string GetCurrentNodeId()
+        {
+            return currentWorldNodeId ?? string.Empty;
+        }
+
+        public void SetCurrentNode(string nodeId)
+        {
+            currentWorldNodeId = nodeId ?? string.Empty;
+            NotifyChanged();
+        }
+
+        protected void NotifyChanged()
+        {
+            OnMetaChanged?.Invoke();
+        }
+
+        public void WireChangeCallbacks()
+        {
+            progression?.SetOnChanged(NotifyChanged);
+            economy?.SetOnChanged(NotifyChanged);
+            hub?.SetOnChanged(NotifyChanged);
+            unlocks?.SetOnChanged(NotifyChanged);
+        }
+
+        public bool HasNodeUnlocked(string nodeId)
+        {
+            return unlocks != null && unlocks.IsNodeUnlocked(nodeId);
+        }
+
+        public static MetaContext CreateDefault()
+        {
+            var meta = new MetaContext();
+            meta.progression.selectedClassId = string.Empty;
+            meta.unlocks.UnlockNode("village");
+            meta.currentWorldNodeId = "village";
+            meta.WireChangeCallbacks();
+            return meta;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Contexts/PlayerProgression.cs
+
+using System;
+using System.Collections.Generic;
+
+namespace Game.Runtime.Contexts
+{
+    [Serializable]
+    public class PlayerProgression
+    {
+        public int playerLevel;
+        public int totalXP;
+        public string selectedClassId;
+        public List<string> unlockedClassIds = new List<string>();
+        public List<string> unlockedSkinIds = new List<string>();
+
+        private Action _onChanged;
+
+        public void SetOnChanged(Action callback)
+        {
+            _onChanged = callback;
+        }
+
+        public void AddXP(int amount)
+        {
+            totalXP += amount;
+            _onChanged?.Invoke();
+        }
+
+        public void SetClass(string classId)
+        {
+            selectedClassId = classId ?? string.Empty;
+            _onChanged?.Invoke();
+        }
+
+        public void UnlockClass(string classId)
+        {
+            if (string.IsNullOrEmpty(classId)) return;
+            if (!unlockedClassIds.Contains(classId))
+                unlockedClassIds.Add(classId);
+            _onChanged?.Invoke();
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Contexts/UnlockState.cs
+
+using System;
+using System.Collections.Generic;
+
+namespace Game.Runtime.Contexts
+{
+    [Serializable]
+    public class UnlockState
+    {
+        public List<string> unlockedNodeIdsList = new List<string>();
+        public List<string> unlockedEdgeIdsList = new List<string>();
+        private HashSet<string> _unlockedNodeIds;
+        private HashSet<string> _unlockedEdgeIds;
+        private Action _onChanged;
+
+        public void SetOnChanged(Action callback)
+        {
+            _onChanged = callback;
+        }
+
+        public bool IsNodeUnlocked(string nodeId)
+        {
+            if (string.IsNullOrEmpty(nodeId)) return false;
+            EnsureSets();
+            return _unlockedNodeIds.Contains(nodeId);
+        }
+
+        public bool IsEdgeUnlocked(string edgeId)
+        {
+            if (string.IsNullOrEmpty(edgeId)) return false;
+            EnsureSets();
+            return _unlockedEdgeIds.Contains(edgeId);
+        }
+
+        private void EnsureSets()
+        {
+            if (_unlockedNodeIds != null) return;
+            _unlockedNodeIds = new HashSet<string>();
+            _unlockedEdgeIds = new HashSet<string>();
+            if (unlockedNodeIdsList != null)
+                foreach (var id in unlockedNodeIdsList)
+                    if (!string.IsNullOrEmpty(id)) _unlockedNodeIds.Add(id);
+            if (unlockedEdgeIdsList != null)
+                foreach (var id in unlockedEdgeIdsList)
+                    if (!string.IsNullOrEmpty(id)) _unlockedEdgeIds.Add(id);
+        }
+
+        private void SyncToLists()
+        {
+            unlockedNodeIdsList = new List<string>(_unlockedNodeIds ?? new HashSet<string>());
+            unlockedEdgeIdsList = new List<string>(_unlockedEdgeIds ?? new HashSet<string>());
+        }
+
+        public void UnlockNode(string nodeId)
+        {
+            if (string.IsNullOrEmpty(nodeId)) return;
+            EnsureSets();
+            _unlockedNodeIds.Add(nodeId);
+            SyncToLists();
+            _onChanged?.Invoke();
+        }
+
+        public void UnlockEdge(string edgeId)
+        {
+            if (string.IsNullOrEmpty(edgeId)) return;
+            EnsureSets();
+            _unlockedEdgeIds.Add(edgeId);
+            SyncToLists();
+            _onChanged?.Invoke();
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/ChunkEnemyRegistrar.cs
+
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using Game.Runtime.Services;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// On chunk root. Registers EnemySpawnPoint with EnemySystem on enable; despawns all on disable.
+    /// Supports late binding: if EnemySystem is not ready, subscribes to OnReady then registers.
+    /// Chunk fully owns the lifecycle of spawned enemies.
+    /// </summary>
+    public class ChunkEnemyRegistrar : MonoBehaviour
+    {
+        private readonly List<EnemyRuntime> _spawnedEnemies = new List<EnemyRuntime>();
+        private bool _subscribedToReady;
+        private bool _isRegistered;
+
+        private void RegisterAll()
+        {
+            var system = EnemySystemRegistry.Current;
+            if (system == null) return;
+
+            var spawnPoints = GetComponentsInChildren<EnemySpawnPoint>(true);
+            foreach (var sp in spawnPoints)
+            {
+                if (sp == null || string.IsNullOrEmpty(sp.enemyId)) continue;
+                var pos = (Vector2)sp.transform.position;
+                var enemy = system.SpawnEnemy(sp.enemyId, pos);
+                if (enemy != null)
+                    _spawnedEnemies.Add(enemy);
+            }
+            _isRegistered = true;
+            Log.Info($"[Game] Spawned {_spawnedEnemies.Count} enemies in chunk {gameObject.name}");
+        }
+
+        private void UnregisterAll()
+        {
+            if (!_isRegistered) return;
+
+            var system = EnemySystemRegistry.Current;
+            if (system != null)
+            {
+                foreach (var e in _spawnedEnemies)
+                {
+                    if (e != null)
+                        system.DespawnEnemy(e);
+                }
+            }
+            _spawnedEnemies.Clear();
+            _isRegistered = false;
+            Log.Info($"[Game] Despawned enemies in chunk {gameObject.name}");
+        }
+
+        private void OnEnable()
+        {
+            if (_isRegistered) return;
+
+            if (EnemySystemRegistry.Current != null)
+                RegisterAll();
+            else
+            {
+                _subscribedToReady = true;
+                EnemySystemRegistry.OnReady += OnEnemySystemReady;
+            }
+        }
+
+        private void OnEnemySystemReady()
+        {
+            if (!_subscribedToReady) return;
+            if (_isRegistered) return;
+            _subscribedToReady = false;
+            EnemySystemRegistry.OnReady -= OnEnemySystemReady;
+            RegisterAll();
+        }
+
+        private void OnDisable()
+        {
+            if (_subscribedToReady)
+            {
+                _subscribedToReady = false;
+                EnemySystemRegistry.OnReady -= OnEnemySystemReady;
+            }
+            UnregisterAll();
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/ChunkEnemySpawner.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// DEPRECATED: Use ChunkEnemyRegistrar instead. This component no longer spawns enemies.
+    /// Kept for backward compatibility if present on existing prefabs/scenes.
+    /// </summary>
+    [DisallowMultipleComponent]
+    public class ChunkEnemySpawner : MonoBehaviour
+    {
+        private void OnEnable()
+        {
+            Debug.LogWarning("[Game] ChunkEnemySpawner is deprecated and does nothing. Use ChunkEnemyRegistrar on chunk root instead.");
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/EnemyRuntime.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// Runtime enemy entity. Creates/destroys view, holds position. No combat/AI in PHASE 11B.
+    /// Does not know about world or player.
+    /// </summary>
+    public class EnemyRuntime : ICombatant
+    {
+        public string enemyId { get; }
+        public Vector2 position { get; set; }
+        public EnemyView view { get; private set; }
+        public bool isAlive { get; set; }
+        public string spawnChunkId { get; }
+
+        Vector2 ICombatant.Position => position;
+        bool ICombatant.IsAlive => isAlive;
+
+        private GameObject _root;
+        private bool _disposed;
+
+        public EnemyRuntime(string enemyId, Vector2 position, string spawnChunkId = null)
+        {
+            this.enemyId = enemyId;
+            this.position = position;
+            this.spawnChunkId = spawnChunkId ?? string.Empty;
+            isAlive = true;
+        }
+
+        public void Initialize()
+        {
+            if (_disposed) return;
+
+            _root = new GameObject($"Enemy_{enemyId}");
+            _root.transform.position = new Vector3(position.x, position.y, 0f);
+            view = _root.AddComponent<EnemyView>();
+        }
+
+        public void Tick(float dt)
+        {
+            if (_root == null || view == null || _disposed) return;
+
+            _root.transform.position = new Vector3(position.x, position.y, 0f);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            isAlive = false;
+            if (_root != null)
+                Object.Destroy(_root);
+            _root = null;
+            view = null;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/EnemySpawnPoint.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// Data-marker for enemy spawn location. Does NOT spawn by itself; ChunkEnemyRegistrar reads it.
+    /// Place in chunk hierarchy; set enemyId in Inspector.
+    /// </summary>
+    public class EnemySpawnPoint : MonoBehaviour
+    {
+        public string enemyId = "enemy_default";
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/EnemySystem.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// Holds and updates all EnemyRuntime. Spawns/despawns by id and position. Does not know about Player.
+    /// </summary>
+    public class EnemySystem
+    {
+        private readonly List<EnemyRuntime> _enemies = new List<EnemyRuntime>();
+        private readonly List<EnemyRuntime> _toRemove = new List<EnemyRuntime>();
+
+        public IReadOnlyList<EnemyRuntime> Enemies => _enemies;
+
+        public EnemyRuntime SpawnEnemy(string enemyId, Vector2 position, string chunkId = null)
+        {
+            if (string.IsNullOrEmpty(enemyId)) return null;
+
+            var enemy = new EnemyRuntime(enemyId, position, chunkId);
+            enemy.Initialize();
+            _enemies.Add(enemy);
+            return enemy;
+        }
+
+        public void DespawnEnemy(EnemyRuntime enemy)
+        {
+            if (enemy == null) return;
+            enemy.Dispose();
+            _enemies.Remove(enemy);
+        }
+
+        public void DespawnEnemiesInChunk(string chunkId)
+        {
+            if (string.IsNullOrEmpty(chunkId)) return;
+
+            _toRemove.Clear();
+            foreach (var e in _enemies)
+            {
+                if (e != null && e.spawnChunkId == chunkId)
+                    _toRemove.Add(e);
+            }
+            foreach (var e in _toRemove)
+                DespawnEnemy(e);
+        }
+
+        public void Tick(float dt)
+        {
+            foreach (var e in _enemies)
+            {
+                if (e != null && e.isAlive)
+                    e.Tick(dt);
+            }
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/EnemySystemRegistry.cs
+
+using System;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// Static registry for current EnemySystem. Set/cleared by WorldRuntime.
+    /// Allows chunk registrars to resolve the system and subscribe to OnReady (late binding).
+    /// </summary>
+    public static class EnemySystemRegistry
+    {
+        public static EnemySystem Current { get; private set; }
+
+        public static event Action OnReady;
+
+        public static void Set(EnemySystem system)
+        {
+            Current = system;
+            OnReady?.Invoke();
+        }
+
+        public static void Clear()
+        {
+            Current = null;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/EnemyView.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// View-only: visual representation of an enemy. SpriteRenderer, no logic.
+    /// Position is driven from outside (EnemyRuntime.Tick).
+    /// </summary>
+    public class EnemyView : MonoBehaviour
+    {
+        [SerializeField] private SpriteRenderer _spriteRenderer;
+
+        public SpriteRenderer SpriteRenderer => _spriteRenderer;
+
+        private void Awake()
+        {
+            if (_spriteRenderer == null)
+                _spriteRenderer = GetComponent<SpriteRenderer>();
+            if (_spriteRenderer == null)
+                _spriteRenderer = gameObject.AddComponent<SpriteRenderer>();
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Enemy/ICombatant.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Enemy
+{
+    /// <summary>
+    /// Stub interface for future combat. EnemyRuntime implements it; no behaviour in PHASE 11B.
+    /// </summary>
+    public interface ICombatant
+    {
+        Vector2 Position { get; }
+        bool IsAlive { get; }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Interaction/ChunkInteractionRegistrar.cs
+
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using Game.Runtime.Services;
+
+namespace Game.Runtime.Interaction
+{
+    /// <summary>
+    /// Sits on chunk root. Registers all IInteractable in children with the current InteractionSystem.
+    /// Uses InteractionSystemRegistry (no FindObjectOfType). Handles late binding when WorldRuntime is created after OnEnable.
+    /// </summary>
+    public class ChunkInteractionRegistrar : MonoBehaviour
+    {
+        private readonly List<IInteractable> _cachedInteractables = new List<IInteractable>();
+        private InteractionSystem _registeredSystem;
+        private bool _subscribedToReady;
+
+        public void RegisterAll()
+        {
+            var system = InteractionSystemRegistry.Current;
+            if (system == null) return;
+
+            CacheInteractables();
+            foreach (var i in _cachedInteractables)
+            {
+                if (i != null)
+                    system.Register(i);
+            }
+            _registeredSystem = system;
+            Log.Info($"[Game] Registered {_cachedInteractables.Count} interactables in chunk {gameObject.name}");
+        }
+
+        public void UnregisterAll()
+        {
+            if (_registeredSystem == null) return;
+            foreach (var i in _cachedInteractables)
+            {
+                if (i != null)
+                    _registeredSystem.Unregister(i);
+            }
+            Log.Info($"[Game] Unregistered interactables in chunk {gameObject.name}");
+            _registeredSystem = null;
+        }
+
+        private void CacheInteractables()
+        {
+            _cachedInteractables.Clear();
+            var monos = GetComponentsInChildren<MonoBehaviour>(true);
+            foreach (var m in monos)
+            {
+                if (m != null && m is IInteractable ia)
+                    _cachedInteractables.Add(ia);
+            }
+        }
+
+        private void OnEnable()
+        {
+            if (InteractionSystemRegistry.Current != null)
+            {
+                RegisterAll();
+            }
+            else
+            {
+                _subscribedToReady = true;
+                InteractionSystemRegistry.OnReady += OnWorldRuntimeReady;
+            }
+        }
+
+        private void OnWorldRuntimeReady()
+        {
+            if (!_subscribedToReady) return;
+            _subscribedToReady = false;
+            InteractionSystemRegistry.OnReady -= OnWorldRuntimeReady;
+            RegisterAll();
+        }
+
+        private void OnDisable()
+        {
+            if (_subscribedToReady)
+            {
+                _subscribedToReady = false;
+                InteractionSystemRegistry.OnReady -= OnWorldRuntimeReady;
+            }
+            UnregisterAll();
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Interaction/IInteractable.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Interaction
+{
+    /// <summary>
+    /// Universal interface for world objects the player can interact with.
+    /// </summary>
+    public interface IInteractable
+    {
+        Vector2 WorldPosition { get; }
+        float InteractionRadius { get; }
+        bool CanInteract();
+        void Interact();
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Interaction/InteractionRequest.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Interaction
+{
+    /// <summary>
+    /// Query for interactables around a point (e.g. player position).
+    /// </summary>
+    public struct InteractionRequest
+    {
+        public Vector2 origin;
+        public float radius;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Interaction/InteractionSystem.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Game.Runtime.Interaction
+{
+    /// <summary>
+    /// Holds registered interactables and processes interaction requests. Pure logic; does not know about Meta/UI.
+    /// </summary>
+    public class InteractionSystem
+    {
+        private readonly List<IInteractable> _interactables = new List<IInteractable>();
+
+        public void Register(IInteractable interactable)
+        {
+            if (interactable != null && !_interactables.Contains(interactable))
+                _interactables.Add(interactable);
+        }
+
+        public void Unregister(IInteractable interactable)
+        {
+            if (interactable != null)
+                _interactables.Remove(interactable);
+        }
+
+        /// <summary>Finds nearest valid interactable in request radius, checks CanInteract, calls Interact. Returns true if interaction occurred.</summary>
+        public bool TryInteract(InteractionRequest request)
+        {
+            float maxSq = request.radius * request.radius;
+            IInteractable nearest = null;
+            float nearestSq = float.MaxValue;
+
+            foreach (var i in _interactables)
+            {
+                if (i == null) continue;
+                float sqDist = (i.WorldPosition - request.origin).sqrMagnitude;
+                if (sqDist > maxSq) continue;
+                if (sqDist > i.InteractionRadius * i.InteractionRadius) continue;
+                if (!i.CanInteract()) continue;
+                if (sqDist < nearestSq)
+                {
+                    nearestSq = sqDist;
+                    nearest = i;
+                }
+            }
+
+            if (nearest == null) return false;
+            nearest.Interact();
+            return true;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Interaction/InteractionSystemRegistry.cs
+
+using System;
+
+namespace Game.Runtime.Interaction
+{
+    /// <summary>
+    /// Static registry for current InteractionSystem and lifecycle events. Set/cleared by WorldRuntime.
+    /// Allows ChunkInteractionRegistrar to resolve the system and subscribe to ready/disposed without FindObjectOfType.
+    /// </summary>
+    public static class InteractionSystemRegistry
+    {
+        public static InteractionSystem Current { get; private set; }
+
+        public static event Action OnReady;
+        public static event Action OnDisposed;
+
+        public static void Set(InteractionSystem system)
+        {
+            Current = system;
+            OnReady?.Invoke();
+        }
+
+        public static void Clear()
+        {
+            OnDisposed?.Invoke();
+            Current = null;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Interaction/SceneInteractableRegistrar.cs
+
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using Game.Runtime.Services;
+
+namespace Game.Runtime.Interaction
+{
+    /// <summary>
+    /// For interactables placed in the scene (not under streamed chunk roots). Registers all IInteractable
+    /// on this GameObject and children with InteractionSystemRegistry when WorldRuntime is ready.
+    /// Add to Bootstrap or to the parent of resource_obj / rune_obj / npc_obj so they get registered.
+    /// </summary>
+    public class SceneInteractableRegistrar : MonoBehaviour
+    {
+        private readonly List<IInteractable> _cachedInteractables = new List<IInteractable>();
+        private InteractionSystem _registeredSystem;
+        private bool _subscribedToReady;
+
+        private void RegisterAll()
+        {
+            var system = InteractionSystemRegistry.Current;
+            if (system == null) return;
+
+            CacheInteractables();
+            foreach (var i in _cachedInteractables)
+            {
+                if (i != null)
+                    system.Register(i);
+            }
+            _registeredSystem = system;
+            Log.Info($"[Game] Registered {_cachedInteractables.Count} scene interactables in {gameObject.name}");
+        }
+
+        private void UnregisterAll()
+        {
+            if (_registeredSystem == null) return;
+            foreach (var i in _cachedInteractables)
+            {
+                if (i != null)
+                    _registeredSystem.Unregister(i);
+            }
+            Log.Info($"[Game] Unregistered scene interactables in {gameObject.name}");
+            _registeredSystem = null;
+        }
+
+        private void CacheInteractables()
+        {
+            _cachedInteractables.Clear();
+            var monos = GetComponentsInChildren<MonoBehaviour>(true);
+            foreach (var m in monos)
+            {
+                if (m != null && m is IInteractable ia)
+                    _cachedInteractables.Add(ia);
+            }
+        }
+
+        private void OnEnable()
+        {
+            if (InteractionSystemRegistry.Current != null)
+                RegisterAll();
+            else
+            {
+                _subscribedToReady = true;
+                InteractionSystemRegistry.OnReady += OnWorldRuntimeReady;
+            }
+        }
+
+        private void OnWorldRuntimeReady()
+        {
+            if (!_subscribedToReady) return;
+            _subscribedToReady = false;
+            InteractionSystemRegistry.OnReady -= OnWorldRuntimeReady;
+            RegisterAll();
+        }
+
+        private void OnDisable()
+        {
+            if (_subscribedToReady)
+            {
+                _subscribedToReady = false;
+                InteractionSystemRegistry.OnReady -= OnWorldRuntimeReady;
+            }
+            UnregisterAll();
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Interaction/Providers/NpcInteractable.cs
+
+using UnityEngine;
+using Game.Runtime.Interaction;
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
+namespace Game.Runtime.Interaction.Providers
+{
+    /// <summary>
+    /// Stub interactable for NPCs. Registration by ChunkInteractionRegistrar (chunks) or SceneInteractableRegistrar (scene).
+    /// </summary>
+    public class NpcInteractable : MonoBehaviour, IInteractable
+    {
+        public float interactionRadius = 2f;
+
+        public Vector2 WorldPosition => transform.position;
+        public float InteractionRadius => interactionRadius;
+
+        public bool CanInteract() => true;
+
+        public void Interact()
+        {
+            UnityEngine.Debug.Log("[Game] Interacted with NPC");
+        }
+
+#if UNITY_EDITOR
+        private void OnDrawGizmos()
+        {
+            Handles.color = new Color(0.2f, 0.8f, 0.2f, 0.4f);
+            Handles.DrawWireDisc(transform.position, Vector3.forward, interactionRadius);
+        }
+#endif
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Interaction/Providers/ResourceInteractable.cs
+
+using UnityEngine;
+using Game.Runtime.Interaction;
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
+namespace Game.Runtime.Interaction.Providers
+{
+    /// <summary>
+    /// Stub interactable for resources. Registration by ChunkInteractionRegistrar or SceneInteractableRegistrar.
+    /// </summary>
+    public class ResourceInteractable : MonoBehaviour, IInteractable
+    {
+        public float interactionRadius = 2f;
+
+        public Vector2 WorldPosition => transform.position;
+        public float InteractionRadius => interactionRadius;
+
+        public bool CanInteract() => true;
+
+        public void Interact()
+        {
+            UnityEngine.Debug.Log("[Game] Interacted with Resource");
+        }
+
+#if UNITY_EDITOR
+        private void OnDrawGizmos()
+        {
+            Handles.color = new Color(0.8f, 0.6f, 0.2f, 0.4f);
+            Handles.DrawWireDisc(transform.position, Vector3.forward, interactionRadius);
+        }
+#endif
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Interaction/Providers/RuneInteractable.cs
+
+using UnityEngine;
+using Game.Runtime.Interaction;
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
+namespace Game.Runtime.Interaction.Providers
+{
+    /// <summary>
+    /// Stub interactable for runes. Registration by ChunkInteractionRegistrar or SceneInteractableRegistrar.
+    /// </summary>
+    public class RuneInteractable : MonoBehaviour, IInteractable
+    {
+        public float interactionRadius = 2f;
+
+        public Vector2 WorldPosition => transform.position;
+        public float InteractionRadius => interactionRadius;
+
+        public bool CanInteract() => true;
+
+        public void Interact()
+        {
+            UnityEngine.Debug.Log("[Game] Interacted with Rune");
+        }
+
+#if UNITY_EDITOR
+        private void OnDrawGizmos()
+        {
+            Handles.color = new Color(0.6f, 0.2f, 0.9f, 0.4f);
+            Handles.DrawWireDisc(transform.position, Vector3.forward, interactionRadius);
+        }
+#endif
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerCameraRig.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Player
+{
+    /// <summary>
+    /// Holds Camera and follows a target position. No Update — position set from outside (PlayerRuntime.Tick).
+    /// Simple follow, no smoothing.
+    /// </summary>
+    [RequireComponent(typeof(Camera))]
+    public class PlayerCameraRig : MonoBehaviour
+    {
+        private Camera _camera;
+        private static readonly Vector3 CameraOffset = new Vector3(0f, 0f, -10f);
+
+        public Camera Camera => _camera;
+
+        private void Awake()
+        {
+            _camera = GetComponent<Camera>();
+        }
+
+        /// <summary>Move camera to follow given world position (2D). Called from PlayerRuntime.Tick.</summary>
+        public void Follow(Vector2 worldPosition)
+        {
+            transform.position = new Vector3(worldPosition.x, worldPosition.y, 0f) + CameraOffset;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerRuntime.cs
+
+using UnityEngine;
+using Game.Runtime.World;
+
+namespace Game.Runtime.Player
+{
+    /// <summary>
+    /// Runtime player entity. Creates/destroys player GameObject, syncs view with anchor, drives camera.
+    /// Not a MonoBehaviour; does not know about StateMachine or MetaContext.
+    /// </summary>
+    public class PlayerRuntime
+    {
+        public PlayerAnchor anchor { get; }
+        public GameObject root { get; private set; }
+        public PlayerView view { get; private set; }
+        public PlayerCameraRig cameraRig { get; private set; }
+
+        private bool _disposed;
+
+        public PlayerRuntime(PlayerAnchor anchor)
+        {
+            this.anchor = anchor;
+        }
+
+        public void Initialize()
+        {
+            if (anchor == null || _disposed) return;
+
+            root = new GameObject("Player");
+            root.transform.position = new Vector3(anchor.Position.x, anchor.Position.y, 0f);
+            view = root.AddComponent<PlayerView>();
+
+            var cameraGo = new GameObject("PlayerCameraRig");
+            cameraGo.AddComponent<Camera>();
+            cameraRig = cameraGo.AddComponent<PlayerCameraRig>();
+        }
+
+        public void Tick(float dt)
+        {
+            if (root == null || view == null || cameraRig == null || _disposed) return;
+
+            var pos = anchor.Position;
+            root.transform.position = new Vector3(pos.x, pos.y, 0f);
+            cameraRig.Follow(pos);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (cameraRig != null && cameraRig.gameObject != null)
+                Object.Destroy(cameraRig.gameObject);
+            cameraRig = null;
+            if (root != null)
+                Object.Destroy(root);
+            root = null;
+            view = null;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/PlayerView.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Player
+{
+    /// <summary>
+    /// View-only: visual representation of the player. No logic, no Update.
+    /// Position is driven from outside (PlayerRuntime).
+    /// </summary>
+    public class PlayerView : MonoBehaviour
+    {
+        [SerializeField] private SpriteRenderer _spriteRenderer;
+
+        public SpriteRenderer SpriteRenderer => _spriteRenderer;
+
+        private void Awake()
+        {
+            if (_spriteRenderer == null)
+                _spriteRenderer = GetComponent<SpriteRenderer>();
+            if (_spriteRenderer == null)
+                _spriteRenderer = gameObject.AddComponent<SpriteRenderer>();
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/Input/PlayerInput.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Player.Input
+{
+    /// <summary>
+    /// Reads player move input (WASD / Arrow keys). Pure logic, no MonoBehaviour.
+    /// </summary>
+    public class PlayerInput
+    {
+        /// <summary>Returns normalized move direction or Vector2.zero if no input.</summary>
+        public Vector2 ReadMoveInput()
+        {
+            float h = UnityEngine.Input.GetAxisRaw("Horizontal");
+            float v = UnityEngine.Input.GetAxisRaw("Vertical");
+            var raw = new Vector2(h, v);
+            if (raw.sqrMagnitude <= 0.0001f)
+                return Vector2.zero;
+            return raw.normalized;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Player/Movement/PlayerMovement.cs
+
+using UnityEngine;
+using Game.Runtime.World;
+
+namespace Game.Runtime.Player.Movement
+{
+    /// <summary>
+    /// Applies movement to PlayerAnchor. Pure logic, no MonoBehaviour.
+    /// </summary>
+    public class PlayerMovement
+    {
+        private readonly PlayerAnchor _anchor;
+        private readonly float _moveSpeed;
+
+        public PlayerMovement(PlayerAnchor anchor, float moveSpeed)
+        {
+            _anchor = anchor;
+            _moveSpeed = Mathf.Max(0f, moveSpeed);
+        }
+
+        public void ApplyMovement(Vector2 direction, float deltaTime)
+        {
+            if (_anchor == null || deltaTime <= 0f) return;
+            if (direction.sqrMagnitude <= 0.0001f) return;
+
+            var normalized = direction.normalized;
+            var delta = normalized * (_moveSpeed * deltaTime);
+            _anchor.Position = _anchor.Position + delta;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Services/HeartbeatService.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Services
+{
+    public class HeartbeatService : ITickable
+    {
+        private float _elapsedTime;
+        private int _tickCount;
+
+        public float ElapsedTime => _elapsedTime;
+        public int TickCount => _tickCount;
+
+        public void Tick(float deltaTime)
+        {
+            _elapsedTime += deltaTime;
+            _tickCount++;
+        }
+
+        public void Reset()
+        {
+            _elapsedTime = 0f;
+            _tickCount = 0;
+        }
+
+        public string GetStatusString()
+        {
+            return $"Elapsed: {_elapsedTime:F2}s, Ticks: {_tickCount}";
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Services/ITickable.cs
+
+namespace Game.Runtime.Services
+{
+    public interface ITickable
+    {
+        void Tick(float deltaTime);
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Services/Log.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.Services
+{
+    public static class Log
+    {
+        private const string Prefix = "[Game]";
+
+        public static void Info(string message)
+        {
+            Debug.Log($"{Prefix} {message}");
+        }
+
+        public static void Warn(string message)
+        {
+            Debug.LogWarning($"{Prefix} {message}");
+        }
+
+        public static void Error(string message)
+        {
+            Debug.LogError($"{Prefix} {message}");
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/Services/SaveService.cs
+
+using System;
+using System.IO;
+using UnityEngine;
+using Game.Runtime.Contexts;
+using Game.Runtime.Services;
+
+namespace Game.Runtime.Services
+{
+    [Serializable]
+    public class MetaSaveWrapper
+    {
+        public int version = 1;
+        public MetaContext data;
+    }
+
+    public class SaveService
+    {
+        private const string MetaFileName = "meta_save.json";
+        private const int SaveVersion = 1;
+        private readonly string _metaPath;
+
+        public SaveService()
+        {
+            _metaPath = Path.Combine(Application.persistentDataPath, MetaFileName);
+        }
+
+        public string MetaSavePath => _metaPath;
+
+        public bool HasMetaSave()
+        {
+            return File.Exists(_metaPath);
+        }
+
+        public void DeleteMetaSave()
+        {
+            try
+            {
+                if (File.Exists(_metaPath))
+                {
+                    File.Delete(_metaPath);
+                    Log.Info("Meta save deleted.");
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Error($"DeleteMetaSave failed: {e.Message}");
+            }
+        }
+
+        public void SaveMeta(MetaContext meta)
+        {
+            if (meta == null)
+            {
+                Log.Warn("SaveMeta: meta is null, skip save.");
+                return;
+            }
+            try
+            {
+                var wrapper = new MetaSaveWrapper { version = SaveVersion, data = meta };
+                string json = JsonUtility.ToJson(wrapper, true);
+                File.WriteAllText(_metaPath, json);
+                Log.Info($"Meta saved to {_metaPath}");
+            }
+            catch (Exception e)
+            {
+                Log.Error($"SaveMeta failed: {e.Message}");
+            }
+        }
+
+        public MetaContext LoadMeta()
+        {
+            if (!File.Exists(_metaPath))
+            {
+                Log.Info("No save file found.");
+                return null;
+            }
+            try
+            {
+                string json = File.ReadAllText(_metaPath);
+                var wrapper = JsonUtility.FromJson<MetaSaveWrapper>(json);
+                if (wrapper == null || wrapper.data == null)
+                {
+                    Log.Warn("Save file invalid or empty.");
+                    return null;
+                }
+                if (wrapper.version != SaveVersion)
+                    Log.Warn($"Save version {wrapper.version}, expected {SaveVersion}.");
+                Log.Info($"Meta loaded from {_metaPath}");
+                return wrapper.data;
+            }
+            catch (Exception e)
+            {
+                Log.Error($"LoadMeta failed: {e.Message}");
+                return null;
+            }
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/DefaultWorldGraph.cs
+
+namespace Game.Runtime.World
+{
+    public static class DefaultWorldGraph
+    {
+        public static WorldGraphData Create()
+        {
+            var data = new WorldGraphData();
+
+            data.nodes.Add(new WorldNodeData
+            {
+                nodeId = "village",
+                displayName = "Village",
+                biomeId = "grassland",
+                isStartNode = true,
+                outgoingEdgeIds = new System.Collections.Generic.List<string> { "village_forest" }
+            });
+            data.nodes.Add(new WorldNodeData
+            {
+                nodeId = "forest",
+                displayName = "Forest",
+                biomeId = "forest",
+                isStartNode = false,
+                outgoingEdgeIds = new System.Collections.Generic.List<string> { "forest_swamp", "forest_ruins" }
+            });
+            data.nodes.Add(new WorldNodeData
+            {
+                nodeId = "swamp",
+                displayName = "Swamp",
+                biomeId = "swamp",
+                isStartNode = false,
+                outgoingEdgeIds = new System.Collections.Generic.List<string>()
+            });
+            data.nodes.Add(new WorldNodeData
+            {
+                nodeId = "ruins",
+                displayName = "Ruins",
+                biomeId = "ruins",
+                isStartNode = false,
+                outgoingEdgeIds = new System.Collections.Generic.List<string>()
+            });
+
+            data.edges.Add(new WorldEdgeData { edgeId = "village_forest", fromNodeId = "village", toNodeId = "forest", unlockConditionId = "" });
+            data.edges.Add(new WorldEdgeData { edgeId = "forest_swamp", fromNodeId = "forest", toNodeId = "swamp", unlockConditionId = "" });
+            data.edges.Add(new WorldEdgeData { edgeId = "forest_ruins", fromNodeId = "forest", toNodeId = "ruins", unlockConditionId = "" });
+
+            return data;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/PlayerAnchor.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Temporary placeholder for player position. Will be replaced by PlayerRuntime.
+    /// Not a MonoBehaviour.
+    /// </summary>
+    public class PlayerAnchor
+    {
+        public Vector2 Position;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/WorldBootstrap.cs
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Creates and configures WorldRuntime from location data.
+    /// Future: ChunkStreamer, PlayerRuntime, systems will be wired here.
+    /// </summary>
+    public static class WorldBootstrap
+    {
+        public static WorldRuntime CreateWorld(string locationId, string biomeId)
+        {
+            var context = new WorldRuntimeContext
+            {
+                locationId = locationId ?? string.Empty,
+                biomeId = biomeId ?? string.Empty,
+                worldOrigin = UnityEngine.Vector2.zero,
+                isInitialized = false
+            };
+            var runtime = new WorldRuntime(context);
+            runtime.Initialize();
+            return runtime;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/WorldEdgeData.cs
+
+using System;
+
+namespace Game.Runtime.World
+{
+    [Serializable]
+    public class WorldEdgeData
+    {
+        public string edgeId;
+        public string fromNodeId;
+        public string toNodeId;
+        public string unlockConditionId;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/WorldGraphData.cs
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Static graph definition: nodes and edges only. No scenes, chunks, or prefabs.
+    /// Used by WorldGraphRuntime; nodeIds are logical keys for future world-content resolution.
+    /// </summary>
+    [Serializable]
+    public class WorldGraphData
+    {
+        public List<WorldNodeData> nodes = new List<WorldNodeData>();
+        public List<WorldEdgeData> edges = new List<WorldEdgeData>();
+
+        public WorldNodeData GetNode(string nodeId)
+        {
+            if (string.IsNullOrEmpty(nodeId)) return null;
+            return nodes?.FirstOrDefault(n => n != null && n.nodeId == nodeId);
+        }
+
+        public IEnumerable<WorldNodeData> GetConnectedNodes(string nodeId)
+        {
+            var node = GetNode(nodeId);
+            if (node?.outgoingEdgeIds == null) yield break;
+            foreach (string edgeId in node.outgoingEdgeIds)
+            {
+                var edge = edges?.FirstOrDefault(e => e != null && e.edgeId == edgeId);
+                if (edge == null) continue;
+                var toNode = GetNode(edge.toNodeId);
+                if (toNode != null)
+                    yield return toNode;
+            }
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/WorldGraphRuntime.cs
+
+using System.Collections.Generic;
+using System.Linq;
+using Game.Runtime.Contexts;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Runtime view of the world graph: nodes, edges, reachability. No dependency on Unity scenes,
+    /// chunks, prefabs, or Addressables. Pure logic and data only.
+    /// nodeId is the logical key; in future it will be used to decide which world content (e.g. chunk set)
+    /// to load — but this class does NOT perform or reference any loading.
+    /// </summary>
+    public class WorldGraphRuntime
+    {
+        private readonly WorldGraphData _data;
+        private readonly MetaContext _meta;
+
+        public WorldGraphRuntime(WorldGraphData data, MetaContext meta)
+        {
+            _data = data ?? new WorldGraphData();
+            _meta = meta;
+        }
+
+        public WorldGraphData Data => _data;
+
+        public IReadOnlyList<WorldNodeData> GetAllNodes()
+        {
+            if (_data?.nodes == null) return new List<WorldNodeData>();
+            return _data.nodes;
+        }
+
+        public bool IsNodeUnlocked(string nodeId)
+        {
+            if (string.IsNullOrEmpty(nodeId)) return false;
+            return _meta != null && _meta.HasNodeUnlocked(nodeId);
+        }
+
+        public bool IsNodeReachable(string fromNodeId, string toNodeId)
+        {
+            if (string.IsNullOrEmpty(fromNodeId) || string.IsNullOrEmpty(toNodeId)) return false;
+            if (fromNodeId == toNodeId) return true;
+            var node = _data.GetNode(fromNodeId);
+            if (node?.outgoingEdgeIds == null) return false;
+            foreach (string edgeId in node.outgoingEdgeIds)
+            {
+                var edge = _data.edges?.FirstOrDefault(e => e != null && e.edgeId == edgeId);
+                if (edge != null && edge.toNodeId == toNodeId)
+                    return true;
+            }
+            return false;
+        }
+
+        public bool CanTravel(string fromNodeId, string toNodeId)
+        {
+            if (string.IsNullOrEmpty(fromNodeId) || string.IsNullOrEmpty(toNodeId)) return false;
+            if (!IsNodeUnlocked(fromNodeId) || !IsNodeUnlocked(toNodeId)) return false;
+            var node = _data.GetNode(fromNodeId);
+            if (node?.outgoingEdgeIds == null) return false;
+            foreach (string edgeId in node.outgoingEdgeIds)
+            {
+                var edge = _data.edges?.FirstOrDefault(e => e != null && e.edgeId == edgeId);
+                if (edge != null && edge.toNodeId == toNodeId)
+                    return true;
+            }
+            return false;
+        }
+
+        public void UnlockNode(string nodeId)
+        {
+            _meta?.unlocks?.UnlockNode(nodeId);
+        }
+
+        public void UnlockEdge(string edgeId)
+        {
+            _meta?.unlocks?.UnlockEdge(edgeId);
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/WorldNodeData.cs
+
+using System;
+using System.Collections.Generic;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Data for one node in the world graph. No references to scenes, prefabs, or chunks.
+    /// nodeId is the stable key: in future it will be used to resolve which world content
+    /// (e.g. addressable chunk prefabs) to load for this location. This type does not reference them.
+    /// </summary>
+    [Serializable]
+    public class WorldNodeData
+    {
+        public string nodeId;
+        public string displayName;
+        public string biomeId;
+        public bool isStartNode;
+        public List<string> outgoingEdgeIds = new List<string>();
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/WorldRuntime.cs
+
+using System;
+using UnityEngine;
+using Game.Runtime.World.Chunks;
+using Game.Runtime.Player;
+using Game.Runtime.Player.Input;
+using Game.Runtime.Player.Movement;
+using Game.Runtime.Interaction;
+using Game.Runtime.Enemy;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Runtime container for the active world. Owns WorldRuntimeContext and lifecycle.
+    /// Does NOT know about MetaContext, StateMachine, or UI. Not a MonoBehaviour.
+    /// </summary>
+    public class WorldRuntime
+    {
+        private WorldRuntimeContext _context;
+        private IChunkSource _chunkSource;
+        private ChunkStreamer _chunkStreamer;
+        private PlayerAnchor _playerAnchor;
+        private PlayerRuntime _playerRuntime;
+        private PlayerInput _playerInput;
+        private PlayerMovement _playerMovement;
+        private InteractionSystem _interactionSystem;
+        private EnemySystem _enemySystem;
+        private bool _disposed;
+
+        private const float InteractionRequestRadius = 5f;
+
+        public WorldRuntimeContext Context => _context;
+        public InteractionSystem InteractionSystem => _interactionSystem;
+
+        public event Action OnWorldRuntimeReady;
+        public event Action OnWorldRuntimeDisposed;
+
+        /// <summary>Set chunk source (e.g. LocationChunkSet). Also forwards to ChunkStreamer.</summary>
+        public void SetChunkSource(IChunkSource source)
+        {
+            _chunkSource = source;
+            _chunkStreamer?.SetSource(source);
+        }
+
+        public WorldRuntime(WorldRuntimeContext context)
+        {
+            _context = context ?? new WorldRuntimeContext();
+        }
+
+        public void Initialize()
+        {
+            if (_context == null || _disposed) return;
+            _playerAnchor = new PlayerAnchor { Position = Vector2.zero };
+            _chunkStreamer = new ChunkStreamer(_chunkSource, 30f);
+            _playerInput = new PlayerInput();
+            _playerMovement = new PlayerMovement(_playerAnchor, 5f);
+            _interactionSystem = new InteractionSystem();
+            _enemySystem = new EnemySystem();
+            EnemySystemRegistry.Set(_enemySystem);
+            _playerRuntime = new PlayerRuntime(_playerAnchor);
+            _playerRuntime.Initialize();
+            _context.isInitialized = true;
+            InteractionSystemRegistry.Set(_interactionSystem);
+            OnWorldRuntimeReady?.Invoke();
+        }
+
+        public void Tick(float dt)
+        {
+            if (_context == null || !_context.isInitialized || _disposed) return;
+
+            _chunkStreamer?.UpdateStreaming(_playerAnchor.Position);
+
+            Vector2 input = _playerInput.ReadMoveInput();
+            _playerMovement.ApplyMovement(input, dt);
+
+            if (UnityEngine.Input.GetKeyDown(KeyCode.E))
+            {
+                var request = new InteractionRequest { origin = _playerAnchor.Position, radius = InteractionRequestRadius };
+                _interactionSystem.TryInteract(request);
+            }
+
+            _enemySystem?.Tick(dt);
+            _playerRuntime?.Tick(dt);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            OnWorldRuntimeDisposed?.Invoke();
+            InteractionSystemRegistry.Clear();
+            _playerRuntime?.Dispose();
+            _playerRuntime = null;
+            _playerInput = null;
+            _playerMovement = null;
+            _interactionSystem = null;
+            EnemySystemRegistry.Clear();
+            _enemySystem = null;
+            _chunkStreamer = null;
+            _playerAnchor = null;
+            _chunkSource = null;
+            _context = null;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/WorldRuntimeContext.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.World
+{
+    /// <summary>
+    /// Runtime context for the active world location. Pure data, no logic.
+    /// worldOrigin reserved for future chunk/streaming coordinates.
+    /// </summary>
+    public class WorldRuntimeContext
+    {
+        public string locationId;
+        public string biomeId;
+        public Vector2 worldOrigin;
+        public bool isInitialized;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/Chunks/ChunkDescriptor.cs
+
+using System;
+using UnityEngine;
+
+namespace Game.Runtime.World.Chunks
+{
+    /// <summary>
+    /// Pure data: describes one chunk (id, future addressable key, world AABB, biome, always-loaded flag).
+    /// No logic, no loading. Used by LocationChunkSet and IChunkSource.
+    /// </summary>
+    [Serializable]
+    public class ChunkDescriptor
+    {
+        public string chunkId;
+        /// <summary>Future Addressables key for loading this chunk.</summary>
+        public string addressableKey;
+        /// <summary>World-space AABB of the chunk.</summary>
+        public Bounds bounds;
+        /// <summary>Optional; for filtering/debug.</summary>
+        public string biomeId;
+        /// <summary>If true, chunk is not unloaded (e.g. hub).</summary>
+        public bool isAlwaysLoaded;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/Chunks/ChunkIdentity.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.World.Chunks
+{
+    /// <summary>
+    /// Holds chunk id on the chunk root. Set by ChunkStreamer when creating the root.
+    /// </summary>
+    public class ChunkIdentity : MonoBehaviour
+    {
+        public string chunkId;
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/Chunks/ChunkRuntime.cs
+
+using UnityEngine;
+
+namespace Game.Runtime.World.Chunks
+{
+    /// <summary>
+    /// Runtime representation of a loaded chunk. Holds descriptor and root GameObject.
+    /// No behavior; lifecycle managed by ChunkStreamer.
+    /// </summary>
+    public class ChunkRuntime
+    {
+        public ChunkDescriptor descriptor;
+        public GameObject root;
+
+        public ChunkRuntime(ChunkDescriptor descriptor, GameObject root)
+        {
+            this.descriptor = descriptor;
+            this.root = root;
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/Chunks/ChunkStreamer.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+using Game.Runtime.Services;
+using Game.Runtime.Interaction;
+using Game.Runtime.Enemy;
+
+namespace Game.Runtime.World.Chunks
+{
+    /// <summary>
+    /// Runtime chunk streaming: loads/unloads chunks by player position. Uses IChunkSource only; no Addressables.
+    /// </summary>
+    public class ChunkStreamer
+    {
+        private IChunkSource _source;
+        private readonly Dictionary<string, ChunkRuntime> _activeChunks = new Dictionary<string, ChunkRuntime>();
+        private readonly float _streamingRadius;
+
+        public float streamingRadius => _streamingRadius;
+
+        public ChunkStreamer(IChunkSource source, float streamingRadius)
+        {
+            _source = source;
+            _streamingRadius = Mathf.Max(0f, streamingRadius);
+        }
+
+        public void SetSource(IChunkSource source)
+        {
+            _source = source;
+        }
+
+        public void UpdateStreaming(Vector2 playerPosition)
+        {
+            var center = new Vector3(playerPosition.x, playerPosition.y, 0f);
+            var size = new Vector3(_streamingRadius * 2f, _streamingRadius * 2f, 1f);
+            var streamingBounds = new Bounds(center, size);
+
+            var desired = new HashSet<string>();
+            if (_source != null)
+            {
+                foreach (var desc in _source.GetChunksIntersecting(streamingBounds))
+                {
+                    if (desc != null && !string.IsNullOrEmpty(desc.chunkId))
+                        desired.Add(desc.chunkId);
+                }
+            }
+
+            foreach (var id in desired)
+            {
+                if (!_activeChunks.ContainsKey(id) && _source != null && _source.TryGetChunk(id, out var desc))
+                    LoadChunk(desc);
+            }
+
+            var toUnload = new List<string>();
+            foreach (var kv in _activeChunks)
+            {
+                if (kv.Value.descriptor != null && kv.Value.descriptor.isAlwaysLoaded)
+                    continue;
+                if (!desired.Contains(kv.Key))
+                    toUnload.Add(kv.Key);
+            }
+            foreach (var id in toUnload)
+                UnloadChunk(id);
+        }
+
+        public void LoadChunk(ChunkDescriptor descriptor)
+        {
+            if (descriptor == null || string.IsNullOrEmpty(descriptor.chunkId)) return;
+            if (_activeChunks.ContainsKey(descriptor.chunkId)) return;
+
+            var root = new GameObject("Chunk_" + descriptor.chunkId);
+            var identity = root.AddComponent<ChunkIdentity>();
+            identity.chunkId = descriptor.chunkId;
+            root.AddComponent<ChunkInteractionRegistrar>();
+            root.AddComponent<ChunkEnemyRegistrar>();
+            var runtime = new ChunkRuntime(descriptor, root);
+            _activeChunks[descriptor.chunkId] = runtime;
+            Log.Info($"Load chunk {descriptor.chunkId}");
+        }
+
+        public void UnloadChunk(string chunkId)
+        {
+            if (string.IsNullOrEmpty(chunkId)) return;
+            if (!_activeChunks.TryGetValue(chunkId, out var runtime)) return;
+
+            _activeChunks.Remove(chunkId);
+            if (runtime.root != null)
+                Object.Destroy(runtime.root);
+            Log.Info($"Unload chunk {chunkId}");
+        }
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/Chunks/IChunkSource.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Game.Runtime.World.Chunks
+{
+    /// <summary>
+    /// Abstraction over chunk data. WorldRuntime will use IChunkSource; implementation can be
+    /// LocationChunkSet now, or later: streaming source, editor preview, etc.
+    /// </summary>
+    public interface IChunkSource
+    {
+        IEnumerable<ChunkDescriptor> GetChunks();
+        bool TryGetChunk(string chunkId, out ChunkDescriptor descriptor);
+        IEnumerable<ChunkDescriptor> GetChunksIntersecting(Bounds area);
+    }
+}
+
+
+==========
+
+# FILE: Game/Runtime/World/Chunks/LocationChunkSet.cs
+
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Game.Runtime.World.Chunks
+{
+    /// <summary>
+    /// Data-only ScriptableObject: registry of chunks for one location.
+    /// Does NOT load chunks, does NOT know about WorldRuntime or Addressables.
+    /// Future: created in Editor, assigned per location; loaded/resolved by locationId in LoadLocationState.
+    /// </summary>
+    [CreateAssetMenu(fileName = "LocationChunkSet", menuName = "Game/Location Chunk Set", order = 0)]
+    public class LocationChunkSet : ScriptableObject, IChunkSource
+    {
+        public string locationId;
+        public List<ChunkDescriptor> chunks = new List<ChunkDescriptor>();
+
+        public IEnumerable<ChunkDescriptor> GetChunks() => GetAllChunks();
+
+        public bool TryGetChunk(string chunkId, out ChunkDescriptor descriptor)
+        {
+            descriptor = null;
+            if (string.IsNullOrEmpty(chunkId) || chunks == null) return false;
+            foreach (var c in chunks)
+            {
+                if (c != null && c.chunkId == chunkId)
+                {
+                    descriptor = c;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        public IEnumerable<ChunkDescriptor> GetAllChunks()
+        {
+            if (chunks == null) yield break;
+            foreach (var c in chunks)
+            {
+                if (c != null)
+                    yield return c;
+            }
+        }
+
+        public IEnumerable<ChunkDescriptor> GetChunksIntersecting(Bounds area)
+        {
+            if (chunks == null) yield break;
+            foreach (var c in chunks)
+            {
+                if (c != null && c.bounds.Intersects(area))
+                    yield return c;
+            }
+        }
+    }
+}
+
+
+==========
+
