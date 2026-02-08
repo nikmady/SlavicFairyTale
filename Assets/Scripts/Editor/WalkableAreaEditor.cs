@@ -104,6 +104,8 @@ public class WalkableAreaEditor : Editor
             }
         }
         serializedObject.Update();
+        float handleSize = HandleUtility.GetHandleSize(Vector3.zero) * 0.075f;
+        float pickSize = handleSize * 2f;
         int c = _points.arraySize;
         for (int i = 0; i < c; i++)
         {
@@ -111,8 +113,10 @@ public class WalkableAreaEditor : Editor
             Vector2 local = elem.vector2Value;
             Vector3 world = _tr.TransformPoint(local);
             bool selected = _selectionTarget == _area && _selectedZonePoint == i;
-            if (selected) Handles.color = Color.yellow;
-            if (Handles.Button(world, Quaternion.identity, 0.06f, 0.1f, Handles.SphereHandleCap))
+            Handles.color = selected ? Color.yellow : new Color(0f, 0.8f, 0f);
+            Handles.DrawSolidDisc(world, Vector3.forward, handleSize);
+            Handles.DrawWireDisc(world, Vector3.forward, handleSize);
+            if (Handles.Button(world, Quaternion.identity, handleSize, pickSize, Handles.CircleHandleCap))
             {
                 _selectionTarget = _area;
                 _selectedZonePoint = i;
@@ -121,9 +125,12 @@ public class WalkableAreaEditor : Editor
                 e.Use();
             }
             Handles.color = Color.white;
-            EditorGUI.BeginChangeCheck();
-            world = Handles.PositionHandle(world, Quaternion.identity);
-            if (EditorGUI.EndChangeCheck()) elem.vector2Value = _tr.InverseTransformPoint(world);
+            if (selected)
+            {
+                EditorGUI.BeginChangeCheck();
+                world = Handles.PositionHandle(world, Quaternion.identity);
+                if (EditorGUI.EndChangeCheck()) elem.vector2Value = _tr.InverseTransformPoint(world);
+            }
         }
         for (int o = 0; o < _obstacles.arraySize; o++)
         {
@@ -133,8 +140,10 @@ public class WalkableAreaEditor : Editor
                 Vector2 local = obs.GetArrayElementAtIndex(i).vector2Value;
                 Vector3 world = _tr.TransformPoint(local);
                 bool selected = _selectionTarget == _area && _selectedObstacleIndex == o && _selectedObstaclePointIndex == i;
-                if (selected) Handles.color = Color.yellow;
-                if (Handles.Button(world, Quaternion.identity, 0.06f, 0.1f, Handles.SphereHandleCap))
+                Handles.color = selected ? Color.yellow : new Color(1f, 0.4f, 0.4f);
+                Handles.DrawSolidDisc(world, Vector3.forward, handleSize);
+                Handles.DrawWireDisc(world, Vector3.forward, handleSize);
+                if (Handles.Button(world, Quaternion.identity, handleSize, pickSize, Handles.CircleHandleCap))
                 {
                     _selectionTarget = _area;
                     _selectedZonePoint = -1;
@@ -143,9 +152,12 @@ public class WalkableAreaEditor : Editor
                     e.Use();
                 }
                 Handles.color = Color.white;
-                EditorGUI.BeginChangeCheck();
-                world = Handles.PositionHandle(world, Quaternion.identity);
-                if (EditorGUI.EndChangeCheck()) obs.GetArrayElementAtIndex(i).vector2Value = _tr.InverseTransformPoint(world);
+                if (selected)
+                {
+                    EditorGUI.BeginChangeCheck();
+                    world = Handles.PositionHandle(world, Quaternion.identity);
+                    if (EditorGUI.EndChangeCheck()) obs.GetArrayElementAtIndex(i).vector2Value = _tr.InverseTransformPoint(world);
+                }
             }
         }
         serializedObject.ApplyModifiedProperties();
