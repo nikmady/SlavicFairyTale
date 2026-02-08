@@ -4,28 +4,34 @@ using UnityEngine;
 public class WalkableArea : MonoBehaviour
 {
     [SerializeField] List<Vector2> _points = new List<Vector2>();
+    [SerializeField] List<int> _segmentStarts = new List<int>();
     [SerializeField] bool _loop = true;
     [SerializeField] List<ObstaclePoints> _obstacles = new List<ObstaclePoints>();
 
     [System.Serializable]
     public class ObstaclePoints { public List<Vector2> points = new List<Vector2>(); }
 
-    Vector2[] _world;
-    int _count;
+    List<Vector2[]> _zonePolys;
     List<Vector2[]> _obstacleWorld;
 
     void Awake() => CacheWorld();
 
     void CacheWorld()
     {
-        if (_points == null || _points.Count < 3) { _world = null; _count = 0; }
-        else
+        _zonePolys = new List<Vector2[]>();
+        if (_points != null && _points.Count >= 3)
         {
-            _count = _points.Count + (_loop ? 1 : 0);
-            _world = new Vector2[_count];
-            for (int i = 0; i < _points.Count; i++)
-                _world[i] = transform.TransformPoint(_points[i]);
-            if (_loop) _world[_points.Count] = _world[0];
+            var starts = _segmentStarts != null && _segmentStarts.Count > 0 ? _segmentStarts : new List<int> { 0 };
+            for (int s = 0; s < starts.Count; s++)
+            {
+                int start = starts[s];
+                int end = s + 1 < starts.Count ? starts[s + 1] : _points.Count;
+                if (end - start < 3) continue;
+                var w = new Vector2[end - start + (_loop ? 1 : 0)];
+                for (int i = 0; i < end - start; i++) w[i] = transform.TransformPoint(_points[start + i]);
+                if (_loop) w[end - start] = w[0];
+                _zonePolys.Add(w);
+            }
         }
         _obstacleWorld = new List<Vector2[]>();
         if (_obstacles != null)
@@ -42,15 +48,25 @@ public class WalkableArea : MonoBehaviour
     public Vector3 ClampToBounds(Vector3 worldPos)
     {
         Vector2 p = worldPos;
-        if (_world != null && _count >= 3 && IsInsidePoly(p, _world, _count))
-        {
-            if (_obstacleWorld != null)
-                foreach (var obs in _obstacleWorld)
-                    if (IsInsidePoly(p, obs, obs.Length)) return (Vector3)ClosestOnPoly(p, obs);
-            return worldPos;
-        }
-        if (_world != null && _count >= 3) return (Vector3)ClosestOnPoly(p, _world);
-        return worldPos;
+        if (_zonePolys != null)
+            foreach (var w in _zonePolys)
+                if (IsInsidePoly(p, w, w.Length))
+                {
+                    if (_obstacleWorld != null)
+                        foreach (var obs in _obstacleWorld)
+                            if (IsInsidePoly(p, obs, obs.Length)) return (Vector3)ClosestOnPoly(p, obs);
+                    return worldPos;
+                }
+        Vector2 best = p;
+        float bestD = float.MaxValue;
+        if (_zonePolys != null)
+            foreach (var w in _zonePolys)
+            {
+                Vector2 q = ClosestOnPoly(p, w);
+                float d = (p - q).sqrMagnitude;
+                if (d < bestD) { bestD = d; best = q; }
+            }
+        return new Vector3(best.x, best.y, 0f);
     }
 
     static bool IsInsidePoly(Vector2 p, Vector2[] w, int count)
@@ -86,6 +102,7 @@ public class WalkableArea : MonoBehaviour
     }
 
     public List<Vector2> Points => _points;
+    public List<int> SegmentStarts => _segmentStarts ?? (_segmentStarts = new List<int>());
     public List<ObstaclePoints> Obstacles => _obstacles;
     public bool Loop { get => _loop; set => _loop = value; }
     public void SetDirty() { if (Application.isPlaying) CacheWorld(); }

@@ -6,6 +6,7 @@ using UnityEngine;
 public class WalkableAreaEditor : Editor
 {
     SerializedProperty _points;
+    SerializedProperty _segmentStarts;
     SerializedProperty _loop;
     SerializedProperty _obstacles;
     WalkableArea _area;
@@ -16,14 +17,19 @@ public class WalkableAreaEditor : Editor
     static bool _drawObstacle;
     static float _brushRadius = 1f;
     static float _pointSpacing = 0.5f;
-    static List<Vector2> _strokePath = new List<Vector2>();
-    static float _pathStep = 0.03f;
+    static Vector2? _lastCenterLocal;
+    static Vector2? _lastAddedPointLocal;
+    static WalkableArea _selectionTarget;
+    static int _selectedZonePoint = -1;
+    static int _selectedObstacleIndex = -1;
+    static int _selectedObstaclePointIndex = -1;
 
     void OnEnable()
     {
         _area = (WalkableArea)target;
         _tr = _area.transform;
         _points = serializedObject.FindProperty("_points");
+        _segmentStarts = serializedObject.FindProperty("_segmentStarts");
         _loop = serializedObject.FindProperty("_loop");
         _obstacles = serializedObject.FindProperty("_obstacles");
     }
@@ -72,21 +78,88 @@ public class WalkableAreaEditor : Editor
             DrawModeSceneGUI();
             return;
         }
-        int c = _points.arraySize;
-        if (c > 0)
+        Event e = Event.current;
+        if (e.type == EventType.KeyDown && (e.keyCode == KeyCode.Delete || e.keyCode == KeyCode.Backspace) && _selectionTarget == _area)
         {
-            serializedObject.Update();
-            for (int i = 0; i < c; i++)
+            if (_selectedZonePoint >= 0 && _selectedZonePoint < _points.arraySize)
             {
-                SerializedProperty elem = _points.GetArrayElementAtIndex(i);
-                Vector2 local = elem.vector2Value;
+                serializedObject.Update();
+                DeleteZonePoint(_selectedZonePoint);
+                serializedObject.ApplyModifiedProperties();
+                _selectedZonePoint = -1;
+                e.Use();
+            }
+            else if (_selectedObstacleIndex >= 0 && _selectedObstacleIndex < _obstacles.arraySize)
+            {
+                var obs = _obstacles.GetArrayElementAtIndex(_selectedObstacleIndex).FindPropertyRelative("points");
+                if (_selectedObstaclePointIndex >= 0 && _selectedObstaclePointIndex < obs.arraySize)
+                {
+                    serializedObject.Update();
+                    obs.DeleteArrayElementAtIndex(_selectedObstaclePointIndex);
+                    serializedObject.ApplyModifiedProperties();
+                    e.Use();
+                }
+                _selectedObstacleIndex = -1;
+                _selectedObstaclePointIndex = -1;
+            }
+        }
+        serializedObject.Update();
+        int c = _points.arraySize;
+        for (int i = 0; i < c; i++)
+        {
+            SerializedProperty elem = _points.GetArrayElementAtIndex(i);
+            Vector2 local = elem.vector2Value;
+            Vector3 world = _tr.TransformPoint(local);
+            bool selected = _selectionTarget == _area && _selectedZonePoint == i;
+            if (selected) Handles.color = Color.yellow;
+            if (Handles.Button(world, Quaternion.identity, 0.06f, 0.1f, Handles.SphereHandleCap))
+            {
+                _selectionTarget = _area;
+                _selectedZonePoint = i;
+                _selectedObstacleIndex = -1;
+                _selectedObstaclePointIndex = -1;
+                e.Use();
+            }
+            Handles.color = Color.white;
+            EditorGUI.BeginChangeCheck();
+            world = Handles.PositionHandle(world, Quaternion.identity);
+            if (EditorGUI.EndChangeCheck()) elem.vector2Value = _tr.InverseTransformPoint(world);
+        }
+        for (int o = 0; o < _obstacles.arraySize; o++)
+        {
+            var obs = _obstacles.GetArrayElementAtIndex(o).FindPropertyRelative("points");
+            for (int i = 0; i < obs.arraySize; i++)
+            {
+                Vector2 local = obs.GetArrayElementAtIndex(i).vector2Value;
                 Vector3 world = _tr.TransformPoint(local);
+                bool selected = _selectionTarget == _area && _selectedObstacleIndex == o && _selectedObstaclePointIndex == i;
+                if (selected) Handles.color = Color.yellow;
+                if (Handles.Button(world, Quaternion.identity, 0.06f, 0.1f, Handles.SphereHandleCap))
+                {
+                    _selectionTarget = _area;
+                    _selectedZonePoint = -1;
+                    _selectedObstacleIndex = o;
+                    _selectedObstaclePointIndex = i;
+                    e.Use();
+                }
+                Handles.color = Color.white;
                 EditorGUI.BeginChangeCheck();
                 world = Handles.PositionHandle(world, Quaternion.identity);
-                if (EditorGUI.EndChangeCheck()) elem.vector2Value = _tr.InverseTransformPoint(world);
+                if (EditorGUI.EndChangeCheck()) obs.GetArrayElementAtIndex(i).vector2Value = _tr.InverseTransformPoint(world);
             }
-            serializedObject.ApplyModifiedProperties();
         }
+        serializedObject.ApplyModifiedProperties();
+    }
+
+    void DeleteZonePoint(int index)
+    {
+        _points.DeleteArrayElementAtIndex(index);
+        for (int j = _segmentStarts.arraySize - 1; j >= 0; j--)
+            if (_segmentStarts.GetArrayElementAtIndex(j).intValue == index)
+                _segmentStarts.DeleteArrayElementAtIndex(j);
+        for (int j = 0; j < _segmentStarts.arraySize; j++)
+            if (_segmentStarts.GetArrayElementAtIndex(j).intValue > index)
+                _segmentStarts.GetArrayElementAtIndex(j).intValue--;
     }
 
     void DrawModeSceneGUI()
@@ -104,134 +177,66 @@ public class WalkableAreaEditor : Editor
 
         if (e.type == EventType.MouseDown && e.button == 0)
         {
-            _strokePath.Clear();
-            _strokePath.Add(centerLocal);
+            serializedObject.Update();
+            if (_drawObstacle)
+            {
+                _obstacles.arraySize++;
+                _obstacles.GetArrayElementAtIndex(_obstacles.arraySize - 1).FindPropertyRelative("points").ClearArray();
+            }
+            else
+            {
+                if (_segmentStarts.arraySize == 0) { _segmentStarts.arraySize = 1; _segmentStarts.GetArrayElementAtIndex(0).intValue = 0; }
+                else { _segmentStarts.arraySize++; _segmentStarts.GetArrayElementAtIndex(_segmentStarts.arraySize - 1).intValue = _points.arraySize; }
+            }
+            serializedObject.ApplyModifiedProperties();
+            _lastCenterLocal = centerLocal;
+            _lastAddedPointLocal = null;
             e.Use();
         }
         else if (e.type == EventType.MouseDrag && e.button == 0)
         {
-            float sq = _pathStep * _pathStep;
-            if (_strokePath.Count == 0 || (centerLocal - _strokePath[_strokePath.Count - 1]).sqrMagnitude >= sq)
-                _strokePath.Add(centerLocal);
-            e.Use();
-        }
-        else if (e.type == EventType.MouseUp && e.button == 0)
-        {
-            if (_strokePath.Count >= 2)
+            Vector2 delta = centerLocal - (_lastCenterLocal ?? centerLocal);
+            if (delta.sqrMagnitude > 0.0001f)
             {
-                List<Vector2> outline = StrokeToOutline(_strokePath, _brushRadius);
-                outline = SimplifyPolygon(outline, _pointSpacing);
-                outline = RemovePointsInside(outline);
-                if (outline.Count >= 3)
+                Vector2 dir = delta.normalized;
+                Vector2 pointOnCircle = centerLocal - dir * _brushRadius;
+                float spacingSq = _pointSpacing * _pointSpacing;
+                bool add = !_lastAddedPointLocal.HasValue || (pointOnCircle - _lastAddedPointLocal.Value).sqrMagnitude >= spacingSq;
+                if (add)
                 {
                     serializedObject.Update();
                     if (_drawObstacle)
                     {
-                        int idx = _obstacles.arraySize;
-                        _obstacles.arraySize++;
-                        var obs = _obstacles.GetArrayElementAtIndex(idx).FindPropertyRelative("points");
-                        obs.ClearArray();
-                        for (int i = 0; i < outline.Count; i++) { obs.arraySize++; obs.GetArrayElementAtIndex(i).vector2Value = outline[i]; }
+                        var obs = _obstacles.GetArrayElementAtIndex(_obstacles.arraySize - 1).FindPropertyRelative("points");
+                        obs.arraySize++;
+                        obs.GetArrayElementAtIndex(obs.arraySize - 1).vector2Value = pointOnCircle;
                     }
                     else
                     {
-                        _points.ClearArray();
-                        for (int i = 0; i < outline.Count; i++) { _points.arraySize++; _points.GetArrayElementAtIndex(i).vector2Value = outline[i]; }
+                        _points.arraySize++;
+                        _points.GetArrayElementAtIndex(_points.arraySize - 1).vector2Value = pointOnCircle;
                     }
                     serializedObject.ApplyModifiedProperties();
+                    _lastAddedPointLocal = pointOnCircle;
                 }
+                _lastCenterLocal = centerLocal;
             }
-            _strokePath.Clear();
             e.Use();
         }
-
-        if (_strokePath.Count >= 2)
+        else if (e.type == EventType.MouseUp && e.button == 0)
         {
-            Handles.color = _drawObstacle ? new Color(1f, 0.3f, 0.3f, 0.8f) : new Color(0.3f, 1f, 0.3f, 0.8f);
-            for (int i = 0; i < _strokePath.Count - 1; i++)
-                Handles.DrawLine(_tr.TransformPoint(_strokePath[i]), _tr.TransformPoint(_strokePath[i + 1]), 3f);
+            serializedObject.Update();
+            if (_drawObstacle && _obstacles.arraySize > 0)
+            {
+                var obs = _obstacles.GetArrayElementAtIndex(_obstacles.arraySize - 1).FindPropertyRelative("points");
+                if (obs.arraySize < 3) _obstacles.DeleteArrayElementAtIndex(_obstacles.arraySize - 1);
+            }
+            serializedObject.ApplyModifiedProperties();
+            _lastCenterLocal = null;
+            _lastAddedPointLocal = null;
+            e.Use();
         }
         SceneView.RepaintAll();
-    }
-
-    static List<Vector2> StrokeToOutline(List<Vector2> path, float radius)
-    {
-        var left = new List<Vector2>();
-        var right = new List<Vector2>();
-        for (int i = 0; i < path.Count - 1; i++)
-        {
-            Vector2 d = (path[i + 1] - path[i]).normalized;
-            Vector2 perp = new Vector2(-d.y, d.x);
-            left.Add(path[i] + perp * radius);
-            right.Add(path[i] - perp * radius);
-        }
-        int n = path.Count - 1;
-        Vector2 lastD = (path[n] - path[n - 1]).normalized;
-        Vector2 lastPerp = new Vector2(-lastD.y, lastD.x);
-        left.Add(path[n] + lastPerp * radius);
-        right.Add(path[n] - lastPerp * radius);
-        var outList = new List<Vector2>();
-        for (int i = 0; i < left.Count; i++) outList.Add(left[i]);
-        for (int i = right.Count - 1; i >= 0; i--) outList.Add(right[i]);
-        return outList;
-    }
-
-    static List<Vector2> SimplifyPolygon(List<Vector2> poly, float spacing)
-    {
-        if (poly == null || poly.Count < 3) return poly;
-        var result = new List<Vector2> { poly[0] };
-        float totalLen = 0f;
-        float nextAt = spacing;
-        for (int i = 0; i < poly.Count; i++)
-        {
-            int j = (i + 1) % poly.Count;
-            float len = (poly[j] - poly[i]).magnitude;
-            if (len < 0.0001f) continue;
-            while (totalLen + len >= nextAt)
-            {
-                float t = (nextAt - totalLen) / len;
-                result.Add(Vector2.Lerp(poly[i], poly[j], t));
-                nextAt += spacing;
-            }
-            totalLen += len;
-        }
-        return result.Count >= 3 ? result : poly;
-    }
-
-    static bool PointInPolygon(Vector2 p, List<Vector2> poly)
-    {
-        int n = poly.Count;
-        bool inside = false;
-        for (int i = 0, j = n - 1; i < n; j = i++)
-        {
-            if ((poly[i].y > p.y) == (poly[j].y > p.y)) continue;
-            float t = (p.y - poly[i].y) / (poly[j].y - poly[i].y);
-            if (p.x < poly[i].x + t * (poly[j].x - poly[i].x)) inside = !inside;
-        }
-        return inside;
-    }
-
-    static List<Vector2> RemovePointsInside(List<Vector2> poly)
-    {
-        if (poly == null || poly.Count <= 3) return poly;
-        var list = new List<Vector2>(poly);
-        bool changed = true;
-        while (changed && list.Count > 3)
-        {
-            changed = false;
-            for (int i = 0; i < list.Count; i++)
-            {
-                var without = new List<Vector2>(list.Count - 1);
-                for (int k = 0; k < list.Count; k++) if (k != i) without.Add(list[k]);
-                if (PointInPolygon(list[i], without))
-                {
-                    list.RemoveAt(i);
-                    changed = true;
-                    break;
-                }
-            }
-        }
-        return list;
     }
 
     static Vector2? MouseToLocal(Vector2 guiPos)
