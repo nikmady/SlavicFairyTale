@@ -13,7 +13,6 @@ public class EnemyAI : MonoBehaviour
     EnemyInstance _instance;
     Animator _animator;
     Transform _root;
-    WalkableArea _walkableArea;
     Vector2 _homeCenter;
     float _homeRadius;
     Transform _player;
@@ -38,52 +37,6 @@ public class EnemyAI : MonoBehaviour
     }
 
     const float MinWanderDistance = 0.5f;
-    static readonly int[] _avoidAngles = { -45, -25, -10, 10, 25, 45 };
-
-    static Vector2 RotateDir(Vector2 d, float deg)
-    {
-        float r = deg * Mathf.Deg2Rad;
-        float c = Mathf.Cos(r), s = Mathf.Sin(r);
-        return new Vector2(d.x * c - d.y * s, d.x * s + d.y * c);
-    }
-
-    bool IsDirBlocked(Vector2 from, Vector2 dirNorm, float check, LayerMask mask)
-    {
-        if (mask != 0 && Physics2D.Raycast(from, dirNorm, check, mask)) return true;
-        if (_walkableArea != null && _walkableArea.IsInObstacle(from + dirNorm * check)) return true;
-        return false;
-    }
-
-    Vector2 GetAvoidanceDir(Vector2 from, Vector2 dir, float dist, LayerMask mask)
-    {
-        if (mask == 0 && _walkableArea == null) return dir.normalized;
-        float check = dist + 0.25f;
-        if (dir.sqrMagnitude < 0.0001f) return dir;
-        Vector2 n = dir.normalized;
-        if (!IsDirBlocked(from, n, check, mask)) return n;
-        float bestDot = -1f;
-        float bestDist = 0f;
-        Vector2 best = n;
-        for (int i = 0; i < _avoidAngles.Length; i++)
-        {
-            Vector2 d = RotateDir(n, _avoidAngles[i]).normalized;
-            bool blocked = IsDirBlocked(from, d, check, mask);
-            float dot = Vector2.Dot(d, n);
-            float hitD = 0f;
-            if (mask != 0) { RaycastHit2D hit = Physics2D.Raycast(from, d, check, mask); hitD = hit ? hit.distance : 0f; }
-            if (!blocked)
-            {
-                if (dot > bestDot) { bestDot = dot; best = d; bestDist = check; }
-            }
-            else if (hitD > bestDist || (hitD >= bestDist - 0.01f && dot > bestDot))
-            {
-                bestDist = hitD;
-                bestDot = dot;
-                best = d;
-            }
-        }
-        return best.normalized;
-    }
 
     void PickNewWanderTarget(Vector2 currentPos, EnemyConfig c)
     {
@@ -95,6 +48,7 @@ public class EnemyAI : MonoBehaviour
         }
     }
 
+    /// <summary> Смещение, чтобы не наслаиваться на других врагов (конфиг: separationRadius, separationStrength, separationEnemyLayer). </summary>
     Vector2 GetSeparationOffset(Vector2 myPos)
     {
         var c = _instance != null ? _instance.Config : null;
@@ -137,8 +91,8 @@ public class EnemyAI : MonoBehaviour
         _root = transform.root;
         var clamp = GetComponent<WalkableAreaClamp>();
         if (clamp == null) clamp = gameObject.AddComponent<WalkableAreaClamp>();
-        _walkableArea = Object.FindObjectOfType<WalkableArea>();
-        if (_walkableArea != null) clamp.SetArea(_walkableArea);
+        var area = Object.FindObjectOfType<WalkableArea>();
+        if (area != null) clamp.SetArea(area);
         var go = GameObject.FindWithTag("Player");
         if (go != null)
         {
@@ -195,7 +149,6 @@ public class EnemyAI : MonoBehaviour
             else
             {
                 Vector2 dir = ((Vector2)_player.position - pos).normalized;
-                dir = GetAvoidanceDir(pos, dir, c.runSpeed * Time.deltaTime, c.movementObstacleLayer);
                 _faceDir = dir;
                 float runSpeedDt = c.runSpeed * Time.deltaTime;
                 pos += dir * runSpeedDt;
@@ -210,7 +163,6 @@ public class EnemyAI : MonoBehaviour
             if (distToHome > _homeRadius)
             {
                 Vector2 toHome = (_homeCenter - pos).normalized;
-                toHome = GetAvoidanceDir(pos, toHome, moveSpeed, c.movementObstacleLayer);
                 _faceDir = toHome;
                 pos += toHome * moveSpeed;
                 pos += GetSeparationOffset(pos);
@@ -237,7 +189,6 @@ public class EnemyAI : MonoBehaviour
                             PickNewWanderTarget(pos, c);
                     }
                     Vector2 toWander = (_wanderTarget - pos).normalized;
-                    toWander = GetAvoidanceDir(pos, toWander, moveSpeed, c.movementObstacleLayer);
                     _faceDir = toWander;
                     pos += toWander * moveSpeed;
                     pos = _homeCenter + Vector2.ClampMagnitude(pos - _homeCenter, _homeRadius);

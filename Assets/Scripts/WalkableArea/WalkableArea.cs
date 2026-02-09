@@ -101,14 +101,6 @@ public class WalkableArea : MonoBehaviour
         return bestPoint;
     }
 
-    public bool IsInObstacle(Vector2 worldPoint)
-    {
-        if (_obstacleWorld == null) return false;
-        foreach (var obs in _obstacleWorld)
-            if (IsInsidePoly(worldPoint, obs, obs.Length)) return true;
-        return false;
-    }
-
     public List<Vector2> Points => _points;
     public List<int> SegmentStarts => _segmentStarts ?? (_segmentStarts = new List<int>());
     public List<ObstaclePoints> Obstacles => _obstacles;

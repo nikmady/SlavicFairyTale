@@ -29,7 +29,6 @@ public class EnemyConfig : ScriptableObject
     [Tooltip("Вероятность встать на передышку, добравшись до точки блуждания (0..1).")]
     [Range(0f, 1f)]
     public float restChance = 0.4f;
-    public LayerMask movementObstacleLayer = 0;
 
     [Header("Reward (on kill)")]
     public int money;

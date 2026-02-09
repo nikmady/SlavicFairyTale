@@ -205,7 +205,6 @@ public class EnemyConfigEditor : Editor
         DrawProperty(serializedObject.FindProperty("separationEnemyLayer"));
         DrawProperty(serializedObject.FindProperty("restDuration"));
         DrawProperty(serializedObject.FindProperty("restChance"));
-        DrawProperty(serializedObject.FindProperty("movementObstacleLayer"));
 
         DrawHeader("Reward (on kill)");
         DrawProperty(serializedObject.FindProperty("money"));

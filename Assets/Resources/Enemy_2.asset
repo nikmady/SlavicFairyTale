@@ -22,13 +22,16 @@ MonoBehaviour:
   attackRange: 0.1
   attackDamage: 10
   attackInterval: 1
-  separationRadius: 0.31
-  separationStrength: 1
+  separationRadius: 0.5
+  separationStrength: 0.7
   separationEnemyLayer:
     serializedVersion: 2
     m_Bits: 8
-  restDuration: 2
-  restChance: 0.4
+  restDuration: 5
+  restChance: 0.569
+  movementObstacleLayer:
+    serializedVersion: 2
+    m_Bits: 0
   money: 0
   exp: 0
   deathAnimationDelay: 1.5
