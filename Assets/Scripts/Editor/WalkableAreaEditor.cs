@@ -26,26 +26,48 @@ public class WalkableAreaEditor : Editor
 
     void OnEnable()
     {
-        _area = (WalkableArea)target;
+        _area = target as WalkableArea;
+        if (_area == null || _area.Equals(null)) return;
         _tr = _area.transform;
+        if (serializedObject == null) return;
         _points = serializedObject.FindProperty("_points");
         _segmentStarts = serializedObject.FindProperty("_segmentStarts");
         _loop = serializedObject.FindProperty("_loop");
         _obstacles = serializedObject.FindProperty("_obstacles");
     }
 
+    void OnDisable()
+    {
+        try
+        {
+            if (_area != null && !_area.Equals(null))
+            {
+                if (_drawTarget == _area) _drawTarget = null;
+                if (_selectionTarget == _area) _selectionTarget = null;
+            }
+        }
+        catch
+        {
+            _drawTarget = null;
+            _selectionTarget = null;
+        }
+    }
+
+    static bool Valid(WalkableArea a) => a != null && !a.Equals(null);
+
     public override void OnInspectorGUI()
     {
+        if (!Valid(_area) || serializedObject == null || _points == null) return;
         serializedObject.Update();
         EditorGUILayout.PropertyField(_loop);
         EditorGUILayout.Space(4);
         _drawMode = EditorGUILayout.Toggle("Draw", _drawMode);
-        if (_drawMode) _drawTarget = _area;
+        if (_drawMode) _drawTarget = Valid(_area) ? _area : null;
         else _drawTarget = null;
         EditorGUI.BeginDisabledGroup(!_drawMode);
         _drawObstacle = EditorGUILayout.Toggle("Draw Obstacle (hole)", _drawObstacle);
-        _brushRadius = Mathf.Max(0.1f, EditorGUILayout.FloatField("Brush Radius", _brushRadius));
-        _pointSpacing = Mathf.Max(0.3f, EditorGUILayout.FloatField("Point Spacing", _pointSpacing));
+        _brushRadius = EditorGUILayout.Slider("Brush Radius", _brushRadius, 0.1f, 20f);
+        _pointSpacing = EditorGUILayout.Slider("Point Spacing", _pointSpacing, 0.01f, 5f);
         EditorGUI.EndDisabledGroup();
         EditorGUILayout.Space(4);
         EditorGUILayout.LabelField("Points", EditorStyles.boldLabel);
@@ -73,13 +95,14 @@ public class WalkableAreaEditor : Editor
 
     void OnSceneGUI()
     {
+        if (!Valid(_area) || serializedObject == null || _points == null) return;
         if (_drawMode && _drawTarget == _area)
         {
             DrawModeSceneGUI();
             return;
         }
         Event e = Event.current;
-        if (e.type == EventType.KeyDown && (e.keyCode == KeyCode.Delete || e.keyCode == KeyCode.Backspace) && _selectionTarget == _area)
+        if (e.type == EventType.KeyDown && (e.keyCode == KeyCode.Delete || e.keyCode == KeyCode.Backspace) && Valid(_selectionTarget) && _selectionTarget == _area)
         {
             if (_selectedZonePoint >= 0 && _selectedZonePoint < _points.arraySize)
             {
@@ -112,7 +135,7 @@ public class WalkableAreaEditor : Editor
             SerializedProperty elem = _points.GetArrayElementAtIndex(i);
             Vector2 local = elem.vector2Value;
             Vector3 world = _tr.TransformPoint(local);
-            bool selected = _selectionTarget == _area && _selectedZonePoint == i;
+            bool selected = Valid(_selectionTarget) && _selectionTarget == _area && _selectedZonePoint == i;
             Handles.color = selected ? Color.yellow : new Color(0f, 0.8f, 0f);
             Handles.DrawSolidDisc(world, Vector3.forward, handleSize);
             Handles.DrawWireDisc(world, Vector3.forward, handleSize);
@@ -139,7 +162,7 @@ public class WalkableAreaEditor : Editor
             {
                 Vector2 local = obs.GetArrayElementAtIndex(i).vector2Value;
                 Vector3 world = _tr.TransformPoint(local);
-                bool selected = _selectionTarget == _area && _selectedObstacleIndex == o && _selectedObstaclePointIndex == i;
+                bool selected = Valid(_selectionTarget) && _selectionTarget == _area && _selectedObstacleIndex == o && _selectedObstaclePointIndex == i;
                 Handles.color = selected ? Color.yellow : new Color(1f, 0.4f, 0.4f);
                 Handles.DrawSolidDisc(world, Vector3.forward, handleSize);
                 Handles.DrawWireDisc(world, Vector3.forward, handleSize);
@@ -257,7 +280,7 @@ public class WalkableAreaEditor : Editor
         if (Mathf.Abs(ray.direction.z) < 0.0001f) return null;
         float t = -ray.origin.z / ray.direction.z;
         Vector3 world = ray.origin + t * ray.direction;
-        if (_drawTarget == null) return new Vector2(world.x, world.y);
+        if (!Valid(_drawTarget)) return new Vector2(world.x, world.y);
         Vector3 local = _drawTarget.transform.InverseTransformPoint(world);
         return new Vector2(local.x, local.y);
     }
