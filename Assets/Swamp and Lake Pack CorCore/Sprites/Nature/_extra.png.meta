@@ -1,0 +1,466 @@
+fileFormatVersion: 2
+guid: a50f532bf700cf64d939d1a344fc3ec2
+TextureImporter:
+  internalIDToNameTable: []
+  externalObjects: {}
+  serializedVersion: 12
+  mipmaps:
+    mipMapMode: 0
+    enableMipMap: 0
+    sRGBTexture: 1
+    linearTexture: 0
+    fadeOut: 0
+    borderMipMap: 0
+    mipMapsPreserveCoverage: 0
+    alphaTestReferenceValue: 0.5
+    mipMapFadeDistanceStart: 1
+    mipMapFadeDistanceEnd: 3
+  bumpmap:
+    convertToNormalMap: 0
+    externalNormalMap: 0
+    heightScale: 0.25
+    normalMapFilter: 0
+  isReadable: 0
+  streamingMipmaps: 0
+  streamingMipmapsPriority: 0
+  vTOnly: 0
+  ignoreMasterTextureLimit: 0
+  grayScaleToAlpha: 0
+  generateCubemap: 6
+  cubemapConvolution: 0
+  seamlessCubemap: 0
+  textureFormat: 1
+  maxTextureSize: 2048
+  textureSettings:
+    serializedVersion: 2
+    filterMode: 1
+    aniso: 1
+    mipBias: 0
+    wrapU: 1
+    wrapV: 1
+    wrapW: 1
+  nPOTScale: 0
+  lightmap: 0
+  compressionQuality: 50
+  spriteMode: 2
+  spriteExtrude: 1
+  spriteMeshType: 1
+  alignment: 0
+  spritePivot: {x: 0.5, y: 0.5}
+  spritePixelsToUnits: 1024
+  spriteBorder: {x: 0, y: 0, z: 0, w: 0}
+  spriteGenerateFallbackPhysicsShape: 1
+  alphaUsage: 1
+  alphaIsTransparency: 1
+  spriteTessellationDetail: -1
+  textureType: 8
+  textureShape: 1
+  singleChannelComponent: 0
+  flipbookRows: 1
+  flipbookColumns: 1
+  maxTextureSizeSet: 0
+  compressionQualitySet: 0
+  textureFormatSet: 0
+  ignorePngGamma: 0
+  applyGammaDecoding: 0
+  cookieLightType: 0
+  platformSettings:
+  - serializedVersion: 3
+    buildTarget: DefaultTexturePlatform
+    maxTextureSize: 2048
+    resizeAlgorithm: 0
+    textureFormat: -1
+    textureCompression: 1
+    compressionQuality: 50
+    crunchedCompression: 0
+    allowsAlphaSplitting: 0
+    overridden: 0
+    androidETC2FallbackOverride: 0
+    forceMaximumCompressionQuality_BC6H_BC7: 0
+  - serializedVersion: 3
+    buildTarget: Standalone
+    maxTextureSize: 2048
+    resizeAlgorithm: 0
+    textureFormat: -1
+    textureCompression: 1
+    compressionQuality: 50
+    crunchedCompression: 0
+    allowsAlphaSplitting: 0
+    overridden: 0
+    androidETC2FallbackOverride: 0
+    forceMaximumCompressionQuality_BC6H_BC7: 0
+  - serializedVersion: 3
+    buildTarget: Server
+    maxTextureSize: 2048
+    resizeAlgorithm: 0
+    textureFormat: -1
+    textureCompression: 1
+    compressionQuality: 50
+    crunchedCompression: 0
+    allowsAlphaSplitting: 0
+    overridden: 0
+    androidETC2FallbackOverride: 0
+    forceMaximumCompressionQuality_BC6H_BC7: 0
+  spriteSheet:
+    serializedVersion: 2
+    sprites:
+    - serializedVersion: 2
+      name: _extra_7
+      rect:
+        serializedVersion: 2
+        x: 727
+        y: 1238
+        width: 547
+        height: 446
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: cbf4d8c639985d348a39bfc08c799f1e
+      internalID: 1725511223
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_8
+      rect:
+        serializedVersion: 2
+        x: 1282
+        y: 1286
+        width: 633
+        height: 428
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: 39fe2b80ac0cd204fa33358b2aa62eac
+      internalID: 1507806236
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_9
+      rect:
+        serializedVersion: 2
+        x: 428
+        y: 1238
+        width: 148
+        height: 167
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: ad406bf342062f64eaa9d2321fd2f11d
+      internalID: 569793057
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_17
+      rect:
+        serializedVersion: 2
+        x: 631
+        y: 820
+        width: 413
+        height: 379
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: 9f128bd806a4438478a02710a97bc21f
+      internalID: -123131308
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_18
+      rect:
+        serializedVersion: 2
+        x: 1096
+        y: 825
+        width: 503
+        height: 369
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: 9b6ffe8daca29f244a0c953e519317e2
+      internalID: 1540015374
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_20
+      rect:
+        serializedVersion: 2
+        x: 297
+        y: 826
+        width: 319
+        height: 242
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: 418c5a41a06461c449b6261ab0ae0a6f
+      internalID: 1821574065
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_23
+      rect:
+        serializedVersion: 2
+        x: 1649
+        y: 826
+        width: 286
+        height: 219
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: b1ebb46b9bac6ad419596fe5cf3be09d
+      internalID: 1457641935
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_27
+      rect:
+        serializedVersion: 2
+        x: 334
+        y: 453
+        width: 375
+        height: 355
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: 1ffbfba50d9b72e4985e7ad94e42d5ae
+      internalID: -1486558876
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_31
+      rect:
+        serializedVersion: 2
+        x: 770
+        y: 486
+        width: 367
+        height: 318
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: fba43796f7cf6c643bbe4f62408b6840
+      internalID: 486177831
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_32
+      rect:
+        serializedVersion: 2
+        x: 1140
+        y: 496
+        width: 382
+        height: 286
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: 32302790a5cbe5c4691b22e2f9e3d83f
+      internalID: 1908378300
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_34
+      rect:
+        serializedVersion: 2
+        x: 1563
+        y: 482
+        width: 371
+        height: 303
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: 163c5b1414d310e44ab3b136a65fe593
+      internalID: 2031053778
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_39
+      rect:
+        serializedVersion: 2
+        x: 1318
+        y: 10
+        width: 657
+        height: 464
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: ec7067d0e5c966c47a9a0f79641c29c9
+      internalID: 1730031909
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_40
+      rect:
+        serializedVersion: 2
+        x: 0
+        y: 7
+        width: 635
+        height: 436
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: c6b0c70028cf5204eb2a0054119effc7
+      internalID: -1317391255
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: _extra_41
+      rect:
+        serializedVersion: 2
+        x: 689
+        y: 12
+        width: 612
+        height: 435
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: 0
+      bones: []
+      spriteID: 5567cf2e33fcb0b458f69e088072b098
+      internalID: -504943237
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    outline: []
+    physicsShape: []
+    bones: []
+    spriteID: 5e97eb03825dee720800000000000000
+    internalID: 0
+    vertices: []
+    indices: 
+    edges: []
+    weights: []
+    secondaryTextures: []
+    nameFileIdTable:
+      _extra_0: -1575594321
+      _extra_1: -630578541
+      _extra_10: -1681201217
+      _extra_11: 2017461638
+      _extra_12: 1478148947
+      _extra_13: 2085096522
+      _extra_14: -1516821663
+      _extra_15: -155443857
+      _extra_16: -1037147531
+      _extra_17: -123131308
+      _extra_18: 1540015374
+      _extra_19: -1617348455
+      _extra_2: -1978107097
+      _extra_20: 1821574065
+      _extra_21: -714603758
+      _extra_22: 313026539
+      _extra_23: 1457641935
+      _extra_24: -209421851
+      _extra_25: 2001148288
+      _extra_26: -621588316
+      _extra_27: -1486558876
+      _extra_28: 1940777886
+      _extra_29: 1938729086
+      _extra_3: -877506792
+      _extra_30: -1229324289
+      _extra_31: 486177831
+      _extra_32: 1908378300
+      _extra_33: -699311266
+      _extra_34: 2031053778
+      _extra_35: 413966299
+      _extra_36: 842974934
+      _extra_37: -1555846716
+      _extra_38: -1825133692
+      _extra_39: 1730031909
+      _extra_4: -1068425937
+      _extra_40: -1317391255
+      _extra_41: -504943237
+      _extra_5: -1104561122
+      _extra_6: -1112874503
+      _extra_7: 1725511223
+      _extra_8: 1507806236
+      _extra_9: 569793057
+  spritePackingTag: 
+  pSDRemoveMatte: 0
+  pSDShowRemoveMatteOption: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 250368
+  packageName: Swamp and Lake Pack CorCore
+  packageVersion: 1.0
+  assetPath: Assets/Swamp and Lake Pack CorCore/Sprites/Nature/_extra.png
+  uploadId: 583048

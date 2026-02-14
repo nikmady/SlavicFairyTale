@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: a4aa5967c4214d74aabc04ceaee6a82b
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 9100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 250368
+  packageName: Swamp and Lake Pack CorCore
+  packageVersion: 1.0
+  assetPath: Assets/Swamp and Lake Pack CorCore/Anim/animation-idle-duck4_0.controller
+  uploadId: 583048
