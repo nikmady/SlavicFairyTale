@@ -31,6 +31,14 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         public int riverCount = 1;
         [Range(1, 3)]
         public int pathWidth = 2;
+        [Range(0, 10)]
+        public int bridgesPerRiver = 1;
+        [Range(2, 50)]
+        public int maxBridgeLength = 12;
+        public Sprite bridgeSpriteHorizontal;
+        public Sprite bridgeSpriteVertical;
+        [Range(0f, 3f)]
+        public float bridgeScale = 1f;
 
         public bool propsFoldout = false;
         [Range(0, 10)]
@@ -58,6 +66,11 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         public float fillPercent;
         public int riverCount;
         public int pathWidth;
+        public int bridgesPerRiver;
+        public int maxBridgeLength;
+        public string bridgeSpriteHorizontalId;
+        public string bridgeSpriteVerticalId;
+        public float bridgeScale;
         public bool propsFoldout;
         public int propEdgePadding;
         public List<SerializablePropData> props = new List<SerializablePropData>();
@@ -70,6 +83,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         public int height = 40;
         public bool debugRivers = true;
         public bool debugLayers = false;
+        public bool debugBridges = false;
         public List<SerializableLayerData> layers = new List<SerializableLayerData>();
     }
 
@@ -82,6 +96,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
     private bool debugRivers = true;
     private bool debugLayers = false;
+    private bool debugBridges = false;
 
     private static readonly Color[] debugLayerColors = new Color[]
     {
@@ -97,7 +112,10 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
     private List<List<Vector3>> debugPaths = new List<List<Vector3>>();
     private List<HashSet<Vector2Int>> debugLayerCells = new List<HashSet<Vector2Int>>();
+    private List<List<List<Vector2Int>>> riverPathCellsByLayer = new List<List<List<Vector2Int>>>();
+    private List<(int layerIndex, List<Vector2Int> cells)> debugBridgesData = new List<(int, List<Vector2Int>)>();
     private Transform propsRoot;
+    private Transform bridgesRoot;
     private Vector2 scrollPos;
 
     private static readonly Vector2Int[] Dir8 =
@@ -138,6 +156,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
         debugRivers = EditorGUILayout.Toggle("Show Paths", debugRivers);
         debugLayers = EditorGUILayout.Toggle("Debug Layers", debugLayers);
+        debugBridges = EditorGUILayout.Toggle("Bridges", debugBridges);
 
         GUILayout.Space(10);
 
@@ -178,6 +197,12 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             {
                 layer.riverCount = EditorGUILayout.IntField("Path Count", layer.riverCount);
                 layer.pathWidth = EditorGUILayout.IntSlider("Path Width", layer.pathWidth, 1, 3);
+                layer.bridgesPerRiver = EditorGUILayout.IntSlider("Bridges Per River", layer.bridgesPerRiver, 0, 10);
+                layer.maxBridgeLength = EditorGUILayout.IntSlider("Max Bridge Length", layer.maxBridgeLength, 2, 50);
+                layer.bridgeSpriteHorizontal = (Sprite)EditorGUILayout.ObjectField("Bridge Sprite (Horizontal)", layer.bridgeSpriteHorizontal, typeof(Sprite), false);
+                layer.bridgeSpriteVertical = (Sprite)EditorGUILayout.ObjectField("Bridge Sprite (Vertical)", layer.bridgeSpriteVertical, typeof(Sprite), false);
+                float rawScale = EditorGUILayout.Slider("Bridge Scale", layer.bridgeScale, 0f, 3f);
+                layer.bridgeScale = Mathf.Clamp(Mathf.Round(rawScale * 2f) / 2f, 0f, 3f);
             }
 
             layer.propsFoldout = EditorGUILayout.Foldout(layer.propsFoldout, "Props (" + layer.props.Count + ")", true);
@@ -250,6 +275,10 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
     {
         debugPaths.Clear();
         debugLayerCells.Clear();
+        debugBridgesData.Clear();
+        riverPathCellsByLayer.Clear();
+        for (int i = 0; i < layers.Count; i++)
+            riverPathCellsByLayer.Add(new List<List<Vector2Int>>());
 
         foreach (var layer in layers)
         {
@@ -257,8 +286,9 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             layer.targetTilemap.ClearAllTiles();
         }
 
-        foreach (var layer in layers)
+        for (int li = 0; li < layers.Count; li++)
         {
+            var layer = layers[li];
             var cells = new HashSet<Vector2Int>();
 
             if (layer.ruleTile == null || layer.targetTilemap == null)
@@ -270,10 +300,12 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             if (!layer.isWater)
                 GenerateFill(layer, cells);
             else
-                GenerateRivers(layer, cells);
+                GenerateRivers(layer, li, cells);
 
             debugLayerCells.Add(cells);
         }
+
+        ComputeBridges();
 
         foreach (var layer in layers)
         {
@@ -282,6 +314,11 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         }
 
         DestroyProps();
+        DestroyBridges();
+        bridgesRoot = new GameObject("__GeneratedBridges__").transform;
+        Undo.RegisterCreatedObjectUndo(bridgesRoot.gameObject, "Generate Bridges");
+        SpawnBridgeSprites();
+
         propsRoot = new GameObject("__GeneratedProps__").transform;
         Undo.RegisterCreatedObjectUndo(propsRoot.gameObject, "Generate Props");
 
@@ -403,6 +440,192 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         return result;
     }
 
+    private void ComputeBridges()
+    {
+        for (int li = 0; li < layers.Count; li++)
+        {
+            var layer = layers[li];
+            if (!layer.isWater || layer.bridgesPerRiver <= 0) continue;
+            if (li >= riverPathCellsByLayer.Count) continue;
+
+            var riverCells = debugLayerCells[li];
+            var paths = riverPathCellsByLayer[li];
+            var placedBridgeCells = new HashSet<Vector2Int>();
+            const int minBridgeDistance = 4;
+
+            foreach (var path in paths)
+            {
+                if (path.Count < 3) continue;
+
+                int n = Mathf.Min(layer.bridgesPerRiver, path.Count - 2);
+                int maxLen = layer.maxBridgeLength;
+
+                for (int b = 0; b < n; b++)
+                {
+                    int startIndex = 1 + (b + 1) * (path.Count - 2) / (n + 1);
+                    bool placed = false;
+
+                    for (int k = 0; k < path.Count - 2 && !placed; k++)
+                    {
+                        int index = 1 + (startIndex - 1 + k) % (path.Count - 2);
+                        Vector2Int cell = path[index];
+
+                        int dx = path[index + 1].x - path[index - 1].x;
+                        int dy = path[index + 1].y - path[index - 1].y;
+
+                        Vector2Int perp1, perp2;
+                        if (Mathf.Abs(dx) >= Mathf.Abs(dy))
+                        {
+                            perp1 = new Vector2Int(0, 1);
+                            perp2 = new Vector2Int(0, -1);
+                        }
+                        else
+                        {
+                            perp1 = new Vector2Int(1, 0);
+                            perp2 = new Vector2Int(-1, 0);
+                        }
+
+                        Vector2Int shore1 = FindShore(cell, perp1, riverCells);
+                        Vector2Int shore2 = FindShore(cell, perp2, riverCells);
+                        var fullLine = LineCellsStraight(shore1, shore2);
+                        var bridgeCells = new List<Vector2Int>();
+                        foreach (var c in fullLine)
+                            if (riverCells.Contains(c))
+                                bridgeCells.Add(c);
+                        if (bridgeCells.Count > 0 && bridgeCells.Count <= maxLen &&
+                            !BridgeTooCloseToPlaced(bridgeCells, placedBridgeCells, minBridgeDistance))
+                        {
+                            debugBridgesData.Add((li, bridgeCells));
+                            foreach (var c in bridgeCells)
+                                placedBridgeCells.Add(c);
+                            placed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private bool BridgeTooCloseToPlaced(List<Vector2Int> bridgeCells, HashSet<Vector2Int> placedCells, int minDistance)
+    {
+        int radius = minDistance - 1;
+        foreach (var c in bridgeCells)
+        {
+            for (int dx = -radius; dx <= radius; dx++)
+                for (int dy = -radius; dy <= radius; dy++)
+                    if (placedCells.Contains(c + new Vector2Int(dx, dy)))
+                        return true;
+        }
+        return false;
+    }
+
+    private Vector2Int FindShore(Vector2Int from, Vector2Int step, HashSet<Vector2Int> riverCells)
+    {
+        Vector2Int p = from;
+        for (int i = 0; i < width + height; i++)
+        {
+            p += step;
+            if (!Inside(p))
+                return Inside(p - step) ? p - step : from;
+            if (!riverCells.Contains(p)) return p;
+        }
+        return from;
+    }
+
+    private List<Vector2Int> LineCellsStraight(Vector2Int a, Vector2Int b)
+    {
+        var list = new List<Vector2Int>();
+        if (a.x == b.x)
+        {
+            int yMin = Mathf.Min(a.y, b.y), yMax = Mathf.Max(a.y, b.y);
+            for (int y = yMin; y <= yMax; y++)
+            {
+                var p = new Vector2Int(a.x, y);
+                if (Inside(p)) list.Add(p);
+            }
+        }
+        else if (a.y == b.y)
+        {
+            int xMin = Mathf.Min(a.x, b.x), xMax = Mathf.Max(a.x, b.x);
+            for (int x = xMin; x <= xMax; x++)
+            {
+                var p = new Vector2Int(x, a.y);
+                if (Inside(p)) list.Add(p);
+            }
+        }
+        return list;
+    }
+
+    private void SpawnBridgeSprites()
+    {
+        for (int i = 0; i < debugBridgesData.Count; i++)
+        {
+            var (li, cells) = debugBridgesData[i];
+            if (li < 0 || li >= layers.Count || cells.Count == 0) continue;
+            var layer = layers[li];
+            var tm = layer.targetTilemap;
+            if (tm == null) continue;
+
+            bool isVertical = cells[0].x == cells[cells.Count - 1].x;
+            Sprite sprite = isVertical ? layer.bridgeSpriteVertical : layer.bridgeSpriteHorizontal;
+            if (sprite == null) continue;
+
+            var tmr = tm.GetComponent<TilemapRenderer>();
+            int sortOrder = tmr != null ? tmr.sortingOrder + 1 : 1;
+            string sortLayerName = tmr != null ? tmr.sortingLayerName : "Default";
+            float scale = layer.bridgeScale <= 0.001f ? 1f : layer.bridgeScale;
+            int segmentsPerCell = Mathf.Max(1, Mathf.RoundToInt(1f / scale));
+
+            Vector3 dirWorld;
+            float cellLength;
+            if (cells.Count >= 2)
+            {
+                Vector3 firstCenter = tm.GetCellCenterWorld(new Vector3Int(cells[0].x, cells[0].y, 0));
+                Vector3 lastCenter = tm.GetCellCenterWorld(new Vector3Int(cells[cells.Count - 1].x, cells[cells.Count - 1].y, 0));
+                dirWorld = (lastCenter - firstCenter).normalized;
+                cellLength = (lastCenter - firstCenter).magnitude / (cells.Count - 1);
+            }
+            else
+            {
+                dirWorld = Vector3.right;
+                cellLength = tm.cellSize.x;
+            }
+
+            float step = cellLength / segmentsPerCell;
+
+            foreach (var cell in cells)
+            {
+                Vector3 cellCenter = tm.GetCellCenterWorld(new Vector3Int(cell.x, cell.y, 0));
+                int baseOrder = sortOrder + (width + height) - (cell.x + cell.y);
+
+                for (int s = 0; s < segmentsPerCell; s++)
+                {
+                    float t = (s - (segmentsPerCell - 1) * 0.5f) * step;
+                    Vector3 pos = cellCenter + dirWorld * t;
+
+                    var go = new GameObject("Bridge");
+                    go.transform.SetParent(bridgesRoot);
+                    go.transform.position = pos;
+                    go.transform.localScale = new Vector3(scale, scale, 1f);
+
+                    var sr = go.AddComponent<SpriteRenderer>();
+                    sr.sprite = sprite;
+                    sr.sortingLayerName = sortLayerName;
+                    sr.sortingOrder = baseOrder;
+                }
+            }
+        }
+    }
+
+    private void DestroyBridges()
+    {
+        if (bridgesRoot != null)
+            DestroyImmediate(bridgesRoot.gameObject);
+        var old = GameObject.Find("__GeneratedBridges__");
+        if (old != null)
+            DestroyImmediate(old);
+    }
+
     private void DestroyProps()
     {
         if (propsRoot != null)
@@ -424,7 +647,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
                 }
     }
 
-    private void GenerateRivers(LayerData layer, HashSet<Vector2Int> cells)
+    private void GenerateRivers(LayerData layer, int layerIndex, HashSet<Vector2Int> cells)
     {
         for (int i = 0; i < layer.riverCount; i++)
         {
@@ -439,6 +662,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
             var path = AStar(start, end);
             DrawPath(layer, path, layer.pathWidth, cells);
+            riverPathCellsByLayer[layerIndex].Add(new List<Vector2Int>(path));
         }
     }
 
@@ -574,10 +798,15 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
     {
         debugPaths.Clear();
         debugLayerCells.Clear();
+        debugBridgesData.Clear();
+        riverPathCellsByLayer.Clear();
         DestroyProps();
+        DestroyBridges();
         foreach (var layer in layers)
+        {
             if (layer.targetTilemap != null)
                 layer.targetTilemap.ClearAllTiles();
+        }
 
         SceneView.RepaintAll();
     }
@@ -590,6 +819,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             height = this.height,
             debugRivers = this.debugRivers,
             debugLayers = this.debugLayers,
+            debugBridges = this.debugBridges,
             layers = new List<SerializableLayerData>()
         };
 
@@ -604,6 +834,11 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
                 fillPercent = layer.fillPercent,
                 riverCount = layer.riverCount,
                 pathWidth = layer.pathWidth,
+                bridgesPerRiver = layer.bridgesPerRiver,
+                maxBridgeLength = layer.maxBridgeLength,
+                bridgeSpriteHorizontalId = ObjToId(layer.bridgeSpriteHorizontal),
+                bridgeSpriteVerticalId = ObjToId(layer.bridgeSpriteVertical),
+                bridgeScale = layer.bridgeScale,
                 propsFoldout = layer.propsFoldout,
                 propEdgePadding = layer.propEdgePadding,
                 props = new List<SerializablePropData>()
@@ -643,6 +878,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         height = data.height;
         debugRivers = data.debugRivers;
         debugLayers = data.debugLayers;
+        debugBridges = data.debugBridges;
         layers.Clear();
 
         if (data.layers == null) return;
@@ -658,6 +894,11 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
                 fillPercent = sl.fillPercent,
                 riverCount = sl.riverCount,
                 pathWidth = sl.pathWidth,
+                bridgesPerRiver = sl.bridgesPerRiver,
+                maxBridgeLength = sl.maxBridgeLength >= 2 ? sl.maxBridgeLength : 12,
+                bridgeSpriteHorizontal = IdToObj<Sprite>(sl.bridgeSpriteHorizontalId),
+                bridgeSpriteVertical = IdToObj<Sprite>(sl.bridgeSpriteVerticalId),
+                bridgeScale = sl.bridgeScale > 0.001f ? sl.bridgeScale : 1f,
                 propsFoldout = sl.propsFoldout,
                 propEdgePadding = sl.propEdgePadding,
                 props = new List<PropData>()
@@ -734,6 +975,26 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             }
 
             DrawDebugLayerLegend();
+        }
+
+        if (debugBridges)
+        {
+            Color bridgeColor = new Color(0.2f, 1f, 0.3f, 0.5f);
+            Color bridgeOutline = new Color(0.2f, 1f, 0.3f, 0.9f);
+            foreach (var (layerIndex, cells) in debugBridgesData)
+            {
+                if (layerIndex < 0 || layerIndex >= layers.Count || layers[layerIndex].targetTilemap == null) continue;
+                var tm = layers[layerIndex].targetTilemap;
+                foreach (var cell in cells)
+                {
+                    Vector3 bot = tm.CellToWorld(new Vector3Int(cell.x, cell.y, 0));
+                    Vector3 right = tm.CellToWorld(new Vector3Int(cell.x + 1, cell.y, 0));
+                    Vector3 top = tm.CellToWorld(new Vector3Int(cell.x + 1, cell.y + 1, 0));
+                    Vector3 left = tm.CellToWorld(new Vector3Int(cell.x, cell.y + 1, 0));
+                    Vector3[] verts = new Vector3[] { bot, right, top, left };
+                    Handles.DrawSolidRectangleWithOutline(verts, bridgeColor, bridgeOutline);
+                }
+            }
         }
     }
 
