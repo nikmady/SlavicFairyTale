@@ -442,6 +442,10 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
     private void ComputeBridges()
     {
+        var placedBridgeCells = new HashSet<Vector2Int>();
+        const int minBridgeDistance = 4;
+        const int minBridgeCells = 2;
+
         for (int li = 0; li < layers.Count; li++)
         {
             var layer = layers[li];
@@ -450,8 +454,6 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
             var riverCells = debugLayerCells[li];
             var paths = riverPathCellsByLayer[li];
-            var placedBridgeCells = new HashSet<Vector2Int>();
-            const int minBridgeDistance = 4;
 
             foreach (var path in paths)
             {
@@ -492,7 +494,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
                         foreach (var c in fullLine)
                             if (riverCells.Contains(c))
                                 bridgeCells.Add(c);
-                        if (bridgeCells.Count > 0 && bridgeCells.Count <= maxLen &&
+                        if (bridgeCells.Count >= minBridgeCells && bridgeCells.Count <= maxLen &&
                             !BridgeTooCloseToPlaced(bridgeCells, placedBridgeCells, minBridgeDistance))
                         {
                             debugBridgesData.Add((li, bridgeCells));
