@@ -27,6 +27,13 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
         public bool isWater = false;
         public float fillPercent = 100f;
+        public bool secondFloor = false;
+        [Range(1, 50)]
+        public int biomeCount = 5;
+        [Range(1, 10000)]
+        public int biomeMinArea = 20;
+        [Range(1, 10000)]
+        public int biomeMaxArea = 80;
 
         public int riverCount = 1;
         [Range(1, 3)]
@@ -64,6 +71,10 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         public string tilemapId;
         public bool isWater;
         public float fillPercent;
+        public bool secondFloor;
+        public int biomeCount;
+        public int biomeMinArea;
+        public int biomeMaxArea;
         public int riverCount;
         public int pathWidth;
         public int bridgesPerRiver;
@@ -83,6 +94,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         public int height = 40;
         public bool debugRivers = true;
         public bool debugLayers = false;
+        public bool debugSecondFloor = false;
         public bool debugBridges = false;
         public List<SerializableLayerData> layers = new List<SerializableLayerData>();
     }
@@ -96,6 +108,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
     private bool debugRivers = true;
     private bool debugLayers = false;
+    private bool debugSecondFloor = false;
     private bool debugBridges = false;
 
     private static readonly Color[] debugLayerColors = new Color[]
@@ -112,6 +125,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
     private List<List<Vector3>> debugPaths = new List<List<Vector3>>();
     private List<HashSet<Vector2Int>> debugLayerCells = new List<HashSet<Vector2Int>>();
+    private List<HashSet<Vector2Int>> debugSecondFloorCells = new List<HashSet<Vector2Int>>();
     private List<List<List<Vector2Int>>> riverPathCellsByLayer = new List<List<List<Vector2Int>>>();
     private List<(int layerIndex, List<Vector2Int> cells)> debugBridgesData = new List<(int, List<Vector2Int>)>();
     private Transform propsRoot;
@@ -122,6 +136,11 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
     {
         new Vector2Int(1, 0), new Vector2Int(1, 1), new Vector2Int(0, 1), new Vector2Int(-1, 1),
         new Vector2Int(-1, 0), new Vector2Int(-1, -1), new Vector2Int(0, -1), new Vector2Int(1, -1)
+    };
+
+    private static readonly Vector2Int[] Dir4 =
+    {
+        new Vector2Int(1, 0), new Vector2Int(-1, 0), new Vector2Int(0, 1), new Vector2Int(0, -1)
     };
 
     [MenuItem("Tools/Isometric Layered Generator")]
@@ -156,6 +175,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
         debugRivers = EditorGUILayout.Toggle("Show Paths", debugRivers);
         debugLayers = EditorGUILayout.Toggle("Debug Layers", debugLayers);
+        debugSecondFloor = EditorGUILayout.Toggle("Second Floor Debug", debugSecondFloor);
         debugBridges = EditorGUILayout.Toggle("Bridges", debugBridges);
 
         GUILayout.Space(10);
@@ -190,6 +210,13 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             layer.targetTilemap = (Tilemap)EditorGUILayout.ObjectField("Target Tilemap", layer.targetTilemap, typeof(Tilemap), true);
 
             layer.isWater = EditorGUILayout.Toggle("Water Mode", layer.isWater);
+            layer.secondFloor = EditorGUILayout.Toggle("Second Floor", layer.secondFloor);
+            if (layer.secondFloor)
+            {
+                layer.biomeCount = EditorGUILayout.IntSlider("Biome Count", layer.biomeCount, 1, 50);
+                layer.biomeMinArea = EditorGUILayout.IntField("Biome Min Area", Mathf.Max(1, layer.biomeMinArea));
+                layer.biomeMaxArea = EditorGUILayout.IntField("Biome Max Area", Mathf.Max(layer.biomeMinArea, layer.biomeMaxArea));
+            }
 
             if (!layer.isWater)
                 layer.fillPercent = EditorGUILayout.Slider("Fill %", layer.fillPercent, 0, 100);
@@ -275,10 +302,15 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
     {
         debugPaths.Clear();
         debugLayerCells.Clear();
+        debugSecondFloorCells.Clear();
         debugBridgesData.Clear();
         riverPathCellsByLayer.Clear();
         for (int i = 0; i < layers.Count; i++)
+        {
             riverPathCellsByLayer.Add(new List<List<Vector2Int>>());
+            debugLayerCells.Add(new HashSet<Vector2Int>());
+            debugSecondFloorCells.Add(new HashSet<Vector2Int>());
+        }
 
         foreach (var layer in layers)
         {
@@ -293,19 +325,47 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
             if (layer.ruleTile == null || layer.targetTilemap == null)
             {
-                debugLayerCells.Add(cells);
+                debugLayerCells[li] = cells;
                 continue;
             }
 
-            if (!layer.isWater)
-                GenerateFill(layer, cells);
-            else
+            if (layer.isWater)
                 GenerateRivers(layer, li, cells);
-
-            debugLayerCells.Add(cells);
+            debugLayerCells[li] = cells;
         }
 
         ComputeBridges();
+
+        var waterMask = BuildWaterMask();
+        var waterDistanceMask = ExpandMask(waterMask, 1);
+        var bridgeExclusionMask = BuildBridgeExclusionMask(2);
+        var edgeExclusionMask = BuildEdgeExclusionMask(2);
+
+        for (int li = 0; li < layers.Count; li++)
+        {
+            var layer = layers[li];
+            if (layer.isWater) continue;
+
+            var cells = new HashSet<Vector2Int>();
+            if (layer.ruleTile == null || layer.targetTilemap == null)
+            {
+                debugLayerCells[li] = cells;
+                continue;
+            }
+
+            if (layer.secondFloor)
+            {
+                var secondFloorBlocked = new HashSet<Vector2Int>(waterDistanceMask);
+                secondFloorBlocked.UnionWith(bridgeExclusionMask);
+                secondFloorBlocked.UnionWith(edgeExclusionMask);
+                GenerateBiomes(layer, cells, secondFloorBlocked);
+                debugSecondFloorCells[li] = new HashSet<Vector2Int>(cells);
+            }
+            else
+                GenerateFill(layer, cells, waterMask);
+
+            debugLayerCells[li] = cells;
+        }
 
         foreach (var layer in layers)
         {
@@ -638,15 +698,329 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             DestroyImmediate(old);
     }
 
-    private void GenerateFill(LayerData layer, HashSet<Vector2Int> cells)
+    private HashSet<Vector2Int> BuildWaterMask()
+    {
+        var water = new HashSet<Vector2Int>();
+        for (int i = 0; i < layers.Count; i++)
+        {
+            if (!layers[i].isWater) continue;
+            if (i >= debugLayerCells.Count || debugLayerCells[i] == null) continue;
+            water.UnionWith(debugLayerCells[i]);
+        }
+        return water;
+    }
+
+    private HashSet<Vector2Int> BuildBridgeExclusionMask(int radius)
+    {
+        var excluded = new HashSet<Vector2Int>();
+        if (radius < 0) return excluded;
+
+        foreach (var (_, cells) in debugBridgesData)
+        {
+            foreach (var cell in cells)
+            {
+                for (int dx = -radius; dx <= radius; dx++)
+                    for (int dy = -radius; dy <= radius; dy++)
+                    {
+                        var p = cell + new Vector2Int(dx, dy);
+                        if (Inside(p))
+                            excluded.Add(p);
+                    }
+            }
+        }
+
+        return excluded;
+    }
+
+    private HashSet<Vector2Int> BuildEdgeExclusionMask(int margin)
+    {
+        var excluded = new HashSet<Vector2Int>();
+        if (margin <= 0) return excluded;
+
+        for (int x = 0; x < width; x++)
+            for (int y = 0; y < height; y++)
+            {
+                bool nearEdge =
+                    x < margin ||
+                    y < margin ||
+                    x >= width - margin ||
+                    y >= height - margin;
+
+                if (nearEdge)
+                    excluded.Add(new Vector2Int(x, y));
+            }
+
+        return excluded;
+    }
+
+    private HashSet<Vector2Int> ExpandMask(HashSet<Vector2Int> source, int radius)
+    {
+        var expanded = new HashSet<Vector2Int>(source);
+        if (radius <= 0 || source == null || source.Count == 0) return expanded;
+
+        foreach (var cell in source)
+        {
+            for (int dx = -radius; dx <= radius; dx++)
+                for (int dy = -radius; dy <= radius; dy++)
+                {
+                    var p = cell + new Vector2Int(dx, dy);
+                    if (Inside(p))
+                        expanded.Add(p);
+                }
+        }
+
+        return expanded;
+    }
+
+    private void GenerateFill(LayerData layer, HashSet<Vector2Int> cells, HashSet<Vector2Int> blockedCells)
     {
         for (int x = 0; x < width; x++)
             for (int y = 0; y < height; y++)
+            {
+                var pos = new Vector2Int(x, y);
+                if (blockedCells != null && blockedCells.Contains(pos)) continue;
                 if (Random.value * 100 <= layer.fillPercent)
                 {
                     layer.targetTilemap.SetTile(new Vector3Int(x, y, 0), layer.ruleTile);
-                    cells.Add(new Vector2Int(x, y));
+                    cells.Add(pos);
                 }
+            }
+    }
+
+    private void GenerateBiomes(LayerData layer, HashSet<Vector2Int> cells, HashSet<Vector2Int> blockedCells)
+    {
+        int biomeCount = Mathf.Max(1, layer.biomeCount);
+        int minArea = Mathf.Max(1, layer.biomeMinArea);
+        int maxArea = Mathf.Max(minArea, layer.biomeMaxArea);
+
+        for (int b = 0; b < biomeCount; b++)
+        {
+            Vector2Int seed;
+            if (!TryPickBiomeSeed(cells, blockedCells, out seed))
+                break;
+
+            int targetArea = Random.Range(minArea, maxArea + 1);
+            var frontier = new List<Vector2Int> { seed };
+            var local = new HashSet<Vector2Int>();
+            int safety = targetArea * 25;
+
+            while (frontier.Count > 0 && local.Count < targetArea && safety-- > 0)
+            {
+                int pick = Random.Range(0, frontier.Count);
+                var current = frontier[pick];
+                frontier.RemoveAt(pick);
+
+                if (!Inside(current)) continue;
+                if (blockedCells != null && blockedCells.Contains(current)) continue;
+                if (cells.Contains(current) || local.Contains(current)) continue;
+                if (local.Count > 0 && !HasCardinalNeighbor(local, current)) continue;
+
+                local.Add(current);
+                foreach (var dir in Dir4)
+                {
+                    if (Random.value > 0.35f)
+                        frontier.Add(current + dir);
+                }
+            }
+
+            PruneDiagonalOnlyCells(local);
+            if (local.Count < 2) continue;
+
+            cells.UnionWith(local);
+        }
+
+        CleanupSecondFloorCells(cells);
+
+        foreach (var pos in cells)
+            layer.targetTilemap.SetTile(new Vector3Int(pos.x, pos.y, 0), layer.ruleTile);
+    }
+
+    private void CleanupSecondFloorCells(HashSet<Vector2Int> cells)
+    {
+        if (cells.Count == 0) return;
+
+        RemoveSmallComponents(cells, 2);
+        RemoveSingleTileNecks(cells);
+        RemoveSmallComponents(cells, 2);
+        if (cells.Count == 0) return;
+
+        bool changed = true;
+        int maxIterations = 12;
+        int iter = 0;
+        while (changed && iter++ < maxIterations)
+        {
+            changed = false;
+            var toRemove = new List<Vector2Int>();
+            foreach (var cell in cells)
+            {
+                int cardinal = CountCardinalNeighbors(cells, cell);
+                if (cardinal < 2) toRemove.Add(cell);
+
+                bool inUpperBand = cell.y >= height - 4;
+                if (inUpperBand && cardinal < 2)
+                {
+                    toRemove.Add(cell);
+                    continue;
+                }
+            }
+
+            if (toRemove.Count > 0 && toRemove.Count < cells.Count)
+            {
+                changed = true;
+                foreach (var cell in toRemove)
+                    cells.Remove(cell);
+
+                RemoveSingleTileNecks(cells);
+                RemoveSmallComponents(cells, 2);
+            }
+        }
+    }
+
+    private void RemoveSingleTileNecks(HashSet<Vector2Int> cells)
+    {
+        if (cells.Count < 3) return;
+
+        bool changed = true;
+        int guard = 0;
+        while (changed && guard++ < 10)
+        {
+            changed = false;
+            var toRemove = new List<Vector2Int>();
+            foreach (var cell in cells)
+            {
+                bool left = cells.Contains(cell + new Vector2Int(-1, 0));
+                bool right = cells.Contains(cell + new Vector2Int(1, 0));
+                bool down = cells.Contains(cell + new Vector2Int(0, -1));
+                bool up = cells.Contains(cell + new Vector2Int(0, 1));
+
+                bool horizontalNeck = left && right && !up && !down;
+                bool verticalNeck = up && down && !left && !right;
+                if (horizontalNeck || verticalNeck)
+                    toRemove.Add(cell);
+            }
+
+            if (toRemove.Count > 0 && toRemove.Count < cells.Count)
+            {
+                changed = true;
+                foreach (var c in toRemove)
+                    cells.Remove(c);
+            }
+        }
+    }
+
+    private void RemoveSmallComponents(HashSet<Vector2Int> cells, int minSize)
+    {
+        if (cells.Count == 0 || minSize <= 1) return;
+
+        var visited = new HashSet<Vector2Int>();
+        var toRemoveAll = new List<Vector2Int>();
+
+        foreach (var start in cells)
+        {
+            if (visited.Contains(start)) continue;
+
+            var queue = new Queue<Vector2Int>();
+            var component = new List<Vector2Int>();
+            queue.Enqueue(start);
+            visited.Add(start);
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                component.Add(current);
+
+                foreach (var dir in Dir4)
+                {
+                    var next = current + dir;
+                    if (!cells.Contains(next) || visited.Contains(next)) continue;
+                    visited.Add(next);
+                    queue.Enqueue(next);
+                }
+            }
+
+            if (component.Count < minSize)
+                toRemoveAll.AddRange(component);
+        }
+
+        foreach (var c in toRemoveAll)
+            cells.Remove(c);
+    }
+
+    private int CountCardinalNeighbors(HashSet<Vector2Int> set, Vector2Int cell)
+    {
+        int count = 0;
+        foreach (var dir in Dir4)
+            if (set.Contains(cell + dir))
+                count++;
+        return count;
+    }
+
+    private bool HasCardinalNeighbor(HashSet<Vector2Int> set, Vector2Int cell)
+    {
+        foreach (var dir in Dir4)
+            if (set.Contains(cell + dir))
+                return true;
+        return false;
+    }
+
+    private void PruneDiagonalOnlyCells(HashSet<Vector2Int> set)
+    {
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            var toRemove = new List<Vector2Int>();
+            foreach (var cell in set)
+            {
+                bool hasCardinal = false;
+                foreach (var dir in Dir4)
+                {
+                    if (set.Contains(cell + dir))
+                    {
+                        hasCardinal = true;
+                        break;
+                    }
+                }
+                if (!hasCardinal)
+                    toRemove.Add(cell);
+            }
+
+            if (toRemove.Count > 0 && toRemove.Count < set.Count)
+            {
+                changed = true;
+                foreach (var cell in toRemove)
+                    set.Remove(cell);
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    private bool TryPickBiomeSeed(HashSet<Vector2Int> existing, HashSet<Vector2Int> blocked, out Vector2Int seed)
+    {
+        for (int i = 0; i < 300; i++)
+        {
+            var p = new Vector2Int(Random.Range(0, width), Random.Range(0, height));
+            if (blocked != null && blocked.Contains(p)) continue;
+            if (existing.Contains(p)) continue;
+            seed = p;
+            return true;
+        }
+
+        for (int x = 0; x < width; x++)
+            for (int y = 0; y < height; y++)
+            {
+                var p = new Vector2Int(x, y);
+                if (blocked != null && blocked.Contains(p)) continue;
+                if (existing.Contains(p)) continue;
+                seed = p;
+                return true;
+            }
+
+        seed = default;
+        return false;
     }
 
     private void GenerateRivers(LayerData layer, int layerIndex, HashSet<Vector2Int> cells)
@@ -800,6 +1174,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
     {
         debugPaths.Clear();
         debugLayerCells.Clear();
+        debugSecondFloorCells.Clear();
         debugBridgesData.Clear();
         riverPathCellsByLayer.Clear();
         DestroyProps();
@@ -821,6 +1196,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             height = this.height,
             debugRivers = this.debugRivers,
             debugLayers = this.debugLayers,
+            debugSecondFloor = this.debugSecondFloor,
             debugBridges = this.debugBridges,
             layers = new List<SerializableLayerData>()
         };
@@ -834,6 +1210,10 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
                 tilemapId = ObjToId(layer.targetTilemap),
                 isWater = layer.isWater,
                 fillPercent = layer.fillPercent,
+                secondFloor = layer.secondFloor,
+                biomeCount = layer.biomeCount,
+                biomeMinArea = layer.biomeMinArea,
+                biomeMaxArea = layer.biomeMaxArea,
                 riverCount = layer.riverCount,
                 pathWidth = layer.pathWidth,
                 bridgesPerRiver = layer.bridgesPerRiver,
@@ -880,6 +1260,7 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         height = data.height;
         debugRivers = data.debugRivers;
         debugLayers = data.debugLayers;
+        debugSecondFloor = data.debugSecondFloor;
         debugBridges = data.debugBridges;
         layers.Clear();
 
@@ -894,6 +1275,10 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
                 targetTilemap = IdToObj<Tilemap>(sl.tilemapId),
                 isWater = sl.isWater,
                 fillPercent = sl.fillPercent,
+                secondFloor = sl.secondFloor,
+                biomeCount = sl.biomeCount > 0 ? sl.biomeCount : 5,
+                biomeMinArea = sl.biomeMinArea > 0 ? sl.biomeMinArea : 20,
+                biomeMaxArea = sl.biomeMaxArea > 0 ? sl.biomeMaxArea : 80,
                 riverCount = sl.riverCount,
                 pathWidth = sl.pathWidth,
                 bridgesPerRiver = sl.bridgesPerRiver,
@@ -977,6 +1362,29 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             }
 
             DrawDebugLayerLegend();
+        }
+
+        if (debugSecondFloor && debugSecondFloorCells.Count == layers.Count)
+        {
+            Color fillColor = new Color(1f, 0.75f, 0.2f, 0.45f);
+            Color outlineColor = new Color(1f, 0.75f, 0.2f, 0.95f);
+            for (int li = 0; li < layers.Count; li++)
+            {
+                var layer = layers[li];
+                if (!layer.secondFloor || layer.targetTilemap == null) continue;
+
+                var tm = layer.targetTilemap;
+                var cells = debugSecondFloorCells[li];
+                foreach (var cell in cells)
+                {
+                    Vector3 bot = tm.CellToWorld(new Vector3Int(cell.x, cell.y, 0));
+                    Vector3 right = tm.CellToWorld(new Vector3Int(cell.x + 1, cell.y, 0));
+                    Vector3 top = tm.CellToWorld(new Vector3Int(cell.x + 1, cell.y + 1, 0));
+                    Vector3 left = tm.CellToWorld(new Vector3Int(cell.x, cell.y + 1, 0));
+                    Vector3[] verts = new Vector3[] { bot, right, top, left };
+                    Handles.DrawSolidRectangleWithOutline(verts, fillColor, outlineColor);
+                }
+            }
         }
 
         if (debugBridges)
