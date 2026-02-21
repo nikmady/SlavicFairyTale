@@ -219,7 +219,10 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             }
 
             if (!layer.isWater)
-                layer.fillPercent = EditorGUILayout.Slider("Fill %", layer.fillPercent, 0, 100);
+            {
+                string fillLabel = layer.secondFloor ? "Biome Fill %" : "Fill %";
+                layer.fillPercent = EditorGUILayout.Slider(fillLabel, layer.fillPercent, 0, 100);
+            }
             else
             {
                 layer.riverCount = EditorGUILayout.IntField("Path Count", layer.riverCount);
@@ -792,6 +795,8 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
         int biomeCount = Mathf.Max(1, layer.biomeCount);
         int minArea = Mathf.Max(1, layer.biomeMinArea);
         int maxArea = Mathf.Max(minArea, layer.biomeMaxArea);
+        float fill01 = Mathf.Clamp01(layer.fillPercent / 100f);
+        if (fill01 <= 0f) return;
 
         for (int b = 0; b < biomeCount; b++)
         {
@@ -799,7 +804,8 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
             if (!TryPickBiomeSeed(cells, blockedCells, out seed))
                 break;
 
-            int targetArea = Random.Range(minArea, maxArea + 1);
+            int baseTargetArea = Random.Range(minArea, maxArea + 1);
+            int targetArea = Mathf.Max(2, Mathf.RoundToInt(baseTargetArea * fill01));
             var frontier = new List<Vector2Int> { seed };
             var local = new HashSet<Vector2Int>();
             int safety = targetArea * 25;
@@ -841,39 +847,11 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
         RemoveSmallComponents(cells, 2);
         RemoveSingleTileNecks(cells);
+        RemoveSingleTileConnectors(cells);
+        RemoveCornerOnlyContacts(cells);
+        RemoveSingleWidthStrips(cells);
+        EnforceDoubleEdgeThickness(cells);
         RemoveSmallComponents(cells, 2);
-        if (cells.Count == 0) return;
-
-        bool changed = true;
-        int maxIterations = 12;
-        int iter = 0;
-        while (changed && iter++ < maxIterations)
-        {
-            changed = false;
-            var toRemove = new List<Vector2Int>();
-            foreach (var cell in cells)
-            {
-                int cardinal = CountCardinalNeighbors(cells, cell);
-                if (cardinal < 2) toRemove.Add(cell);
-
-                bool inUpperBand = cell.y >= height - 4;
-                if (inUpperBand && cardinal < 2)
-                {
-                    toRemove.Add(cell);
-                    continue;
-                }
-            }
-
-            if (toRemove.Count > 0 && toRemove.Count < cells.Count)
-            {
-                changed = true;
-                foreach (var cell in toRemove)
-                    cells.Remove(cell);
-
-                RemoveSingleTileNecks(cells);
-                RemoveSmallComponents(cells, 2);
-            }
-        }
     }
 
     private void RemoveSingleTileNecks(HashSet<Vector2Int> cells)
@@ -906,6 +884,223 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
                     cells.Remove(c);
             }
         }
+    }
+
+    private void RemoveSingleTileConnectors(HashSet<Vector2Int> cells)
+    {
+        if (cells.Count < 4) return;
+
+        bool changed = true;
+        int guard = 0;
+        while (changed && guard++ < 8)
+        {
+            changed = false;
+            var toRemove = new List<Vector2Int>();
+            foreach (var cell in cells)
+            {
+                if (!IsSingleTileConnector(cells, cell)) continue;
+                toRemove.Add(cell);
+            }
+
+            if (toRemove.Count > 0 && toRemove.Count < cells.Count)
+            {
+                changed = true;
+                foreach (var c in toRemove)
+                    cells.Remove(c);
+            }
+        }
+    }
+
+    private bool IsSingleTileConnector(HashSet<Vector2Int> cells, Vector2Int cell)
+    {
+        var neighbors = new List<Vector2Int>(4);
+        foreach (var dir in Dir4)
+        {
+            var n = cell + dir;
+            if (cells.Contains(n))
+                neighbors.Add(n);
+        }
+
+        if (neighbors.Count < 2) return false;
+        if (HasSupport2x2(cells, cell)) return false;
+
+        var visited = new HashSet<Vector2Int>();
+        var queue = new Queue<Vector2Int>();
+        queue.Enqueue(neighbors[0]);
+        visited.Add(neighbors[0]);
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            foreach (var dir in Dir4)
+            {
+                var next = current + dir;
+                if (next == cell) continue;
+                if (!cells.Contains(next) || visited.Contains(next)) continue;
+                visited.Add(next);
+                queue.Enqueue(next);
+            }
+        }
+
+        for (int i = 1; i < neighbors.Count; i++)
+            if (!visited.Contains(neighbors[i]))
+                return true;
+
+        return false;
+    }
+
+    private void RemoveCornerOnlyContacts(HashSet<Vector2Int> cells)
+    {
+        if (cells.Count < 2) return;
+
+        bool changed = true;
+        int guard = 0;
+        Vector2Int[] diagDirs =
+        {
+            new Vector2Int(1, 1),
+            new Vector2Int(1, -1),
+            new Vector2Int(-1, 1),
+            new Vector2Int(-1, -1)
+        };
+
+        while (changed && guard++ < 10)
+        {
+            changed = false;
+            var toRemove = new HashSet<Vector2Int>();
+            var snapshot = new List<Vector2Int>(cells);
+
+            foreach (var c in snapshot)
+            {
+                if (!cells.Contains(c)) continue;
+
+                foreach (var d in diagDirs)
+                {
+                    var n = c + d;
+                    if (!cells.Contains(n)) continue;
+
+                    var sideA = c + new Vector2Int(d.x, 0);
+                    var sideB = c + new Vector2Int(0, d.y);
+                    bool hasEdgeBridge = cells.Contains(sideA) || cells.Contains(sideB);
+                    if (hasEdgeBridge) continue;
+
+                    int cScore = CountCardinalNeighbors(cells, c);
+                    int nScore = CountCardinalNeighbors(cells, n);
+                    if (cScore < nScore)
+                        toRemove.Add(c);
+                    else if (nScore < cScore)
+                        toRemove.Add(n);
+                    else
+                        toRemove.Add(c.x + c.y > n.x + n.y ? c : n);
+                }
+            }
+
+            if (toRemove.Count > 0 && toRemove.Count < cells.Count)
+            {
+                changed = true;
+                foreach (var c in toRemove)
+                    cells.Remove(c);
+            }
+        }
+    }
+
+    private void RemoveSingleWidthStrips(HashSet<Vector2Int> cells)
+    {
+        if (cells.Count < 3) return;
+
+        bool changed = true;
+        int guard = 0;
+        while (changed && guard++ < 12)
+        {
+            changed = false;
+            var toRemove = new List<Vector2Int>();
+            foreach (var cell in cells)
+            {
+                if (HasSupport2x2(cells, cell)) continue;
+
+                bool left = cells.Contains(cell + new Vector2Int(-1, 0));
+                bool right = cells.Contains(cell + new Vector2Int(1, 0));
+                bool down = cells.Contains(cell + new Vector2Int(0, -1));
+                bool up = cells.Contains(cell + new Vector2Int(0, 1));
+                int count = (left ? 1 : 0) + (right ? 1 : 0) + (up ? 1 : 0) + (down ? 1 : 0);
+
+                if (count <= 1)
+                {
+                    toRemove.Add(cell);
+                    continue;
+                }
+
+                bool straightLine = (left && right && !up && !down) || (up && down && !left && !right);
+                if (count == 2 && straightLine)
+                    toRemove.Add(cell);
+            }
+
+            if (toRemove.Count > 0 && toRemove.Count < cells.Count)
+            {
+                changed = true;
+                foreach (var c in toRemove)
+                    cells.Remove(c);
+                RemoveSmallComponents(cells, 2);
+            }
+        }
+    }
+
+    private void EnforceDoubleEdgeThickness(HashSet<Vector2Int> cells)
+    {
+        if (cells.Count < 4) return;
+
+        bool changed = true;
+        int guard = 0;
+        while (changed && guard++ < 10)
+        {
+            changed = false;
+            var toRemove = new List<Vector2Int>();
+            foreach (var cell in cells)
+            {
+                if (!HasSupport2x2(cells, cell))
+                    toRemove.Add(cell);
+            }
+
+            if (toRemove.Count > 0 && toRemove.Count < cells.Count)
+            {
+                changed = true;
+                foreach (var c in toRemove)
+                    cells.Remove(c);
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    private int CountCardinalNeighbors(HashSet<Vector2Int> cells, Vector2Int cell)
+    {
+        int count = 0;
+        foreach (var dir in Dir4)
+            if (cells.Contains(cell + dir))
+                count++;
+        return count;
+    }
+
+    private bool HasSupport2x2(HashSet<Vector2Int> cells, Vector2Int c)
+    {
+        if (cells.Contains(c + new Vector2Int(1, 0)) &&
+            cells.Contains(c + new Vector2Int(0, 1)) &&
+            cells.Contains(c + new Vector2Int(1, 1)))
+            return true;
+        if (cells.Contains(c + new Vector2Int(-1, 0)) &&
+            cells.Contains(c + new Vector2Int(0, 1)) &&
+            cells.Contains(c + new Vector2Int(-1, 1)))
+            return true;
+        if (cells.Contains(c + new Vector2Int(1, 0)) &&
+            cells.Contains(c + new Vector2Int(0, -1)) &&
+            cells.Contains(c + new Vector2Int(1, -1)))
+            return true;
+        if (cells.Contains(c + new Vector2Int(-1, 0)) &&
+            cells.Contains(c + new Vector2Int(0, -1)) &&
+            cells.Contains(c + new Vector2Int(-1, -1)))
+            return true;
+        return false;
     }
 
     private void RemoveSmallComponents(HashSet<Vector2Int> cells, int minSize)
@@ -944,15 +1139,6 @@ public class IsometricLayeredGeneratorWindow : EditorWindow
 
         foreach (var c in toRemoveAll)
             cells.Remove(c);
-    }
-
-    private int CountCardinalNeighbors(HashSet<Vector2Int> set, Vector2Int cell)
-    {
-        int count = 0;
-        foreach (var dir in Dir4)
-            if (set.Contains(cell + dir))
-                count++;
-        return count;
     }
 
     private bool HasCardinalNeighbor(HashSet<Vector2Int> set, Vector2Int cell)
